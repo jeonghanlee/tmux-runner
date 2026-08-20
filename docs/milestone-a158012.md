@@ -13,7 +13,7 @@ Canonical branch or ref: master
 Git upstream: origin/master
 Remote tracker: none
 
-Next session entry point: prepare the accepted M1 correction commit after commit delegation, then record its hash in the closing register update.
+Next session entry point: no open milestone or backlog item; create a new canonical plan before further implementation.
 
 ## Milestone
 
@@ -21,9 +21,9 @@ Next session entry point: prepare the accepted M1 correction commit after commit
 
 | Group | ID | Work unit | Type | Status | Ready | Deps | Done when / Evidence |
 | --- | --- | --- | --- | --- | --- | --- | --- |
-| Core | M1 | Deliver the local tmux runner | Milestone | In progress | No | D1, D2, D3, D4, D5, D6, D7, D8, D9, D10 | Corrected T1-T8, third-person review, and final second-person reader pass accepted; correction commit pending; [detail](#m1---deliver-the-local-tmux-runner) |
+| Core | M1 | Deliver the local tmux runner | Milestone | Complete | No | D1, D2, D3, D4, D5, D6, D7, D8, D9, D10 | Complete 2026-08-20, correction commit `ede2b62`; corrected T1-T8, third-person review, and final second-person reader pass accepted; [detail](#m1---deliver-the-local-tmux-runner) |
 
-Milestone tally: In progress 1.
+Milestone tally: Complete 1.
 
 ### Decisions
 
@@ -47,7 +47,7 @@ Milestone tally: In progress 1.
 Origin: a158012 / M1
 Identity History: none
 GitHub Issue: none
-Status: In progress
+Status: Complete
 
 ##### Summary
 
@@ -149,7 +149,7 @@ Superseded Plan Artifacts: none
 - 2026-08-20: The independent third-person review accepted the enhancement after installed-copy help, option-looking session attachment, completion collision, spaced-home installation, first-use, and exact-reuse probes returned no finding.
 - 2026-08-20: The second-person reader pass found that First Use omitted the detach step required before exact reuse and that the requirement checks did not verify Bash or GNU Make versions; the accepted corrections add both reader-visible steps.
 - 2026-08-20: A fresh second-person reader accepted the corrected README after executing requirement version checks, installation, `PATH`, completion, create, documented detach, and exact reuse without another finding.
-- Correction commit: pending commit delegation.
+- Correction commit: `ede2b62c478b0f7d87a93c7c55b5ee0323740abf` (`Harden tmux runner behavior and help`).
 
 ## Backlog
 
