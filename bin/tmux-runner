@@ -1,0 +1,287 @@
+#!/usr/bin/env bash
+
+set -euo pipefail
+
+readonly PROGRAM_NAME="${0##*/}"
+TMUX_BIN=$(type -P tmux || true)
+readonly TMUX_BIN
+HOSTNAME_BIN=$(type -P hostname || true)
+readonly HOSTNAME_BIN
+
+function print_usage {
+    printf 'Usage:\n' >&2
+    printf '  %s create [-s <session-name>] [-c <folder>]\n' "$PROGRAM_NAME" >&2
+    printf '  %s c [-s <session-name>] [-c <folder>]\n' "$PROGRAM_NAME" >&2
+    printf '  %s ls\n' "$PROGRAM_NAME" >&2
+    printf '  %s attach -t <session-name>\n' "$PROGRAM_NAME" >&2
+    printf '  %s attach <session-name>\n' "$PROGRAM_NAME" >&2
+    printf '  %s a -t <session-name>\n' "$PROGRAM_NAME" >&2
+    printf '  %s a <session-name>\n' "$PROGRAM_NAME" >&2
+}
+
+function fail {
+    local message="$1"
+
+    printf '%s: %s\n' "$PROGRAM_NAME" "$message" >&2
+    return 2
+}
+
+function fail_create_usage {
+    local command_name="$1"
+    local message="$2"
+
+    printf '%s: %s\n' "$PROGRAM_NAME" "$message" >&2
+    printf 'Usage: %s %s [-s <session-name>] [-c <folder>]\n' \
+        "$PROGRAM_NAME" "$command_name" >&2
+    return 2
+}
+
+function fail_attach_usage {
+    local command_name="$1"
+    local message="$2"
+
+    printf '%s: %s\n' "$PROGRAM_NAME" "$message" >&2
+    printf 'Usage: %s %s -t <session-name>\n' \
+        "$PROGRAM_NAME" "$command_name" >&2
+    printf '       %s %s <session-name>\n' \
+        "$PROGRAM_NAME" "$command_name" >&2
+    return 2
+}
+
+function normalize_session_name {
+    local session_name="$1"
+
+    session_name="${session_name//./_}"
+    session_name="${session_name//:/_}"
+    printf '%s\n' "$session_name"
+}
+
+function connect_session {
+    local session_name="$1"
+    local target="=$session_name"
+
+    if [[ -n "${TMUX:-}" ]]; then
+        "$TMUX_BIN" switch-client -t "$target"
+    else
+        "$TMUX_BIN" attach-session -t "$target"
+    fi
+}
+
+function run_create {
+    local command_name="$1"
+    local session_name=""
+    local directory=""
+    local resolved_directory=""
+    local folder_name=""
+    local short_hostname=""
+    local target=""
+    local saw_session=0
+    local saw_directory=0
+
+    shift
+    while (( $# > 0 )); do
+        case "$1" in
+            -s)
+                if (( saw_session )) || (( $# < 2 )) || [[ -z "$2" ]]; then
+                    fail_create_usage "$command_name" \
+                        "-s requires one session name and may appear only once"
+                    return
+                fi
+                session_name="$2"
+                saw_session=1
+                shift 2
+                ;;
+            -c)
+                if (( saw_directory )) || (( $# < 2 )) || [[ -z "$2" ]]; then
+                    fail_create_usage "$command_name" \
+                        "-c requires one folder and may appear only once"
+                    return
+                fi
+                directory="$2"
+                saw_directory=1
+                shift 2
+                ;;
+            --)
+                shift
+                break
+                ;;
+            -*)
+                fail_create_usage "$command_name" "unknown option: $1"
+                return
+                ;;
+            *)
+                fail_create_usage "$command_name" "unexpected argument: $1"
+                return
+                ;;
+        esac
+    done
+
+    if (( $# > 0 )); then
+        fail_create_usage "$command_name" "unexpected argument: $1"
+        return
+    fi
+
+    if [[ -z "$directory" ]]; then
+        directory="$PWD"
+    fi
+    if ! resolved_directory=$(cd -- "$directory" 2>/dev/null && pwd -P); then
+        fail_create_usage "$command_name" "folder does not exist: $directory"
+        return
+    fi
+
+    if [[ -z "$session_name" ]]; then
+        folder_name="${resolved_directory##*/}"
+        if [[ -z "$folder_name" ]]; then
+            folder_name="root"
+        fi
+        if [[ -z "$HOSTNAME_BIN" ]] || [[ ! -x "$HOSTNAME_BIN" ]]; then
+            fail "hostname is not available in PATH"
+            return
+        fi
+        short_hostname=$("$HOSTNAME_BIN" -s)
+        session_name="$folder_name-$short_hostname"
+    fi
+
+    session_name=$(normalize_session_name "$session_name")
+    if [[ -z "$session_name" ]]; then
+        fail_create_usage "$command_name" "session name must not be empty"
+        return
+    fi
+    target="=$session_name"
+
+    if ! "$TMUX_BIN" has-session -t "$target" 2>/dev/null; then
+        "$TMUX_BIN" new-session -d -s "$session_name" -c "$resolved_directory"
+    fi
+    connect_session "$session_name"
+}
+
+function run_attach {
+    local command_name="$1"
+    local session_name=""
+    local saw_target=0
+
+    shift
+    while (( $# > 0 )); do
+        case "$1" in
+            -t)
+                if (( saw_target )) || [[ -n "$session_name" ]] || \
+                    (( $# < 2 )) || [[ -z "$2" ]]; then
+                    fail_attach_usage "$command_name" \
+                        "provide exactly one session target"
+                    return
+                fi
+                session_name="$2"
+                saw_target=1
+                shift 2
+                ;;
+            --)
+                shift
+                break
+                ;;
+            -*)
+                fail_attach_usage "$command_name" "unknown option: $1"
+                return
+                ;;
+            *)
+                if [[ -n "$session_name" ]]; then
+                    fail_attach_usage "$command_name" \
+                        "provide exactly one session target"
+                    return
+                fi
+                session_name="$1"
+                shift
+                ;;
+        esac
+    done
+
+    if (( $# > 0 )) || [[ -z "$session_name" ]]; then
+        fail_attach_usage "$command_name" "provide exactly one session target"
+        return
+    fi
+
+    session_name=$(normalize_session_name "$session_name")
+    connect_session "$session_name"
+}
+
+function run_list {
+    local output=""
+    local selection=""
+    local index=0
+    local selected_row=""
+    local selected_name=""
+    local -a rows=()
+
+    if (( $# > 0 )); then
+        fail "ls does not accept arguments"
+        return
+    fi
+    if ! output=$("$TMUX_BIN" list-sessions); then
+        return 1
+    fi
+    mapfile -t rows <<< "$output"
+
+    for index in "${!rows[@]}"; do
+        printf '%d %s\n' "$((index + 1))" "${rows[$index]}"
+    done
+    printf 'Select session: '
+    if ! IFS= read -r selection; then
+        printf '\n' >&2
+        fail "no selection received"
+        return
+    fi
+    if [[ ! "$selection" =~ ^[0-9]+$ ]]; then
+        fail "selection must be a number"
+        return
+    fi
+
+    while [[ "${#selection}" -gt 1 ]] && [[ "${selection:0:1}" == "0" ]]; do
+        selection="${selection:1}"
+    done
+    selected_name=""
+    for index in "${!rows[@]}"; do
+        if [[ "$selection" == "$((index + 1))" ]]; then
+            selected_row="${rows[$index]}"
+            selected_name="${selected_row%%:*}"
+            break
+        fi
+    done
+    if [[ -z "$selected_name" ]]; then
+        fail "selection is outside the displayed range"
+        return
+    fi
+    connect_session "$selected_name"
+}
+
+function main {
+    local command_name="${1:-}"
+
+    if [[ -z "$TMUX_BIN" ]] || [[ ! -x "$TMUX_BIN" ]]; then
+        fail "tmux is not available in PATH"
+        return
+    fi
+    if [[ -z "$command_name" ]]; then
+        print_usage
+        return 2
+    fi
+    shift
+
+    case "$command_name" in
+        create|c)
+            run_create "$command_name" "$@"
+            ;;
+        attach|a)
+            run_attach "$command_name" "$@"
+            ;;
+        ls)
+            run_list "$@"
+            ;;
+        *)
+            printf '%s: unknown command: %s\n' \
+                "$PROGRAM_NAME" "$command_name" >&2
+            print_usage
+            return 2
+            ;;
+    esac
+}
+
+main "$@"
