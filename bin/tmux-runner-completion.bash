@@ -21,7 +21,7 @@ function _tmux_runner {
 
     if (( COMP_CWORD == 1 )); then
         mapfile -t COMPREPLY < <(
-            compgen -W 'create c ls attach a' -- "$current"
+            compgen -W 'create c ls attach a -h --help' -- "$current"
         )
         return
     fi
@@ -31,13 +31,24 @@ function _tmux_runner {
             if [[ "$previous" == "-c" ]]; then
                 mapfile -t COMPREPLY < <(compgen -d -- "$current")
             elif [[ "$current" == -* ]]; then
-                mapfile -t COMPREPLY < <(compgen -W '-s -c' -- "$current")
+                mapfile -t COMPREPLY < <(
+                    compgen -W '-s -c -h --help' -- "$current"
+                )
+            fi
+            ;;
+        ls)
+            if [[ "$current" == -* ]]; then
+                mapfile -t COMPREPLY < <(compgen -W '-h --help' -- "$current")
             fi
             ;;
         attach|a)
-            if [[ "$current" == -* ]]; then
-                mapfile -t COMPREPLY < <(compgen -W '-t' -- "$current")
-            elif [[ "$previous" == "-t" ]] || (( COMP_CWORD == 2 )); then
+            if [[ "$previous" == "-t" ]] || [[ "$previous" == "--" ]]; then
+                _tmux_runner_complete_sessions "$current"
+            elif [[ "$current" == -* ]]; then
+                mapfile -t COMPREPLY < <(
+                    compgen -W '-t -h --help' -- "$current"
+                )
+            elif (( COMP_CWORD == 2 )); then
                 _tmux_runner_complete_sessions "$current"
             fi
             ;;

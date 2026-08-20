@@ -9,14 +9,72 @@ HOSTNAME_BIN=$(type -P hostname || true)
 readonly HOSTNAME_BIN
 
 function print_usage {
-    printf 'Usage:\n' >&2
-    printf '  %s create [-s <session-name>] [-c <folder>]\n' "$PROGRAM_NAME" >&2
-    printf '  %s c [-s <session-name>] [-c <folder>]\n' "$PROGRAM_NAME" >&2
-    printf '  %s ls\n' "$PROGRAM_NAME" >&2
-    printf '  %s attach -t <session-name>\n' "$PROGRAM_NAME" >&2
-    printf '  %s attach <session-name>\n' "$PROGRAM_NAME" >&2
-    printf '  %s a -t <session-name>\n' "$PROGRAM_NAME" >&2
-    printf '  %s a <session-name>\n' "$PROGRAM_NAME" >&2
+    printf 'Usage:\n'
+    printf '  %s create [-s <session-name>] [-c <folder>]\n' "$PROGRAM_NAME"
+    printf '  %s c [-s <session-name>] [-c <folder>]\n' "$PROGRAM_NAME"
+    printf '  %s ls\n' "$PROGRAM_NAME"
+    printf '  %s attach -t <session-name>\n' "$PROGRAM_NAME"
+    printf '  %s attach <session-name>\n' "$PROGRAM_NAME"
+    printf '  %s attach -- <session-name>\n' "$PROGRAM_NAME"
+    printf '  %s a -t <session-name>\n' "$PROGRAM_NAME"
+    printf '  %s a <session-name>\n' "$PROGRAM_NAME"
+    printf '  %s a -- <session-name>\n' "$PROGRAM_NAME"
+    printf '\nCommands:\n'
+    printf '  create, c  Create or reuse a session and enter it.\n'
+    printf '  ls         List sessions, select one by number, and enter it.\n'
+    printf '  attach, a  Enter an existing session by name.\n'
+    printf '\nOptions:\n'
+    printf '  -h, --help  Show this help and exit.\n'
+}
+
+function print_create_usage {
+    local command_name="$1"
+
+    printf 'Usage: %s %s [-s <session-name>] [-c <folder>]\n' \
+        "$PROGRAM_NAME" "$command_name"
+}
+
+function print_create_help {
+    local command_name="$1"
+
+    print_create_usage "$command_name"
+    printf '\nCreate or reuse a session and enter it immediately.\n'
+    printf '\nOptions:\n'
+    printf '  -s <session-name>  Set the session name.\n'
+    printf '  -c <folder>        Set the session working directory.\n'
+    printf '  -h, --help         Show this help and exit.\n'
+    printf '\nDefaults:\n'
+    printf '  Folder: current directory\n'
+    printf '  Session: <folder>-<short-hostname>\n'
+}
+
+function print_list_help {
+    printf 'Usage: %s ls\n' "$PROGRAM_NAME"
+    printf '\nList complete tmux session rows, select one by number, and enter it.\n'
+    printf '\nOptions:\n'
+    printf '  -h, --help  Show this help and exit.\n'
+}
+
+function print_attach_usage {
+    local command_name="$1"
+
+    printf 'Usage: %s %s -t <session-name>\n' \
+        "$PROGRAM_NAME" "$command_name"
+    printf '       %s %s <session-name>\n' \
+        "$PROGRAM_NAME" "$command_name"
+    printf '       %s %s -- <session-name>\n' \
+        "$PROGRAM_NAME" "$command_name"
+}
+
+function print_attach_help {
+    local command_name="$1"
+
+    print_attach_usage "$command_name"
+    printf '\nEnter an existing session by exact name.\n'
+    printf '\nOptions:\n'
+    printf '  -t <session-name>  Set the target session.\n'
+    printf '  -h, --help         Show this help and exit.\n'
+    printf '\nUse -- before a positional session name that begins with -.\n'
 }
 
 function fail {
@@ -31,8 +89,7 @@ function fail_create_usage {
     local message="$2"
 
     printf '%s: %s\n' "$PROGRAM_NAME" "$message" >&2
-    printf 'Usage: %s %s [-s <session-name>] [-c <folder>]\n' \
-        "$PROGRAM_NAME" "$command_name" >&2
+    print_create_usage "$command_name" >&2
     return 2
 }
 
@@ -41,10 +98,7 @@ function fail_attach_usage {
     local message="$2"
 
     printf '%s: %s\n' "$PROGRAM_NAME" "$message" >&2
-    printf 'Usage: %s %s -t <session-name>\n' \
-        "$PROGRAM_NAME" "$command_name" >&2
-    printf '       %s %s <session-name>\n' \
-        "$PROGRAM_NAME" "$command_name" >&2
+    print_attach_usage "$command_name" >&2
     return 2
 }
 
@@ -75,6 +129,8 @@ function run_create {
     local folder_name=""
     local short_hostname=""
     local target=""
+    local create_output=""
+    local create_rc=0
     local saw_session=0
     local saw_directory=0
 
@@ -150,7 +206,16 @@ function run_create {
     target="=$session_name"
 
     if ! "$TMUX_BIN" has-session -t "$target" 2>/dev/null; then
-        "$TMUX_BIN" new-session -d -s "$session_name" -c "$resolved_directory"
+        create_output=$("$TMUX_BIN" new-session -d -s "$session_name" \
+            -c "$resolved_directory" 2>&1) || create_rc=$?
+        if (( create_rc != 0 )); then
+            if ! "$TMUX_BIN" has-session -t "$target" 2>/dev/null; then
+                if [[ -n "$create_output" ]]; then
+                    printf '%s\n' "$create_output" >&2
+                fi
+                return "$create_rc"
+            fi
+        fi
     fi
     connect_session "$session_name"
 }
@@ -175,7 +240,15 @@ function run_attach {
                 shift 2
                 ;;
             --)
-                shift
+                if [[ -n "$session_name" ]] || (( $# != 2 )) || \
+                    [[ -z "$2" ]]; then
+                    fail_attach_usage "$command_name" \
+                        "provide exactly one session target"
+                    return
+                fi
+                session_name="$2"
+                saw_target=1
+                shift 2
                 break
                 ;;
             -*)
@@ -255,15 +328,52 @@ function run_list {
 function main {
     local command_name="${1:-}"
 
+    if [[ -z "$command_name" ]]; then
+        print_usage >&2
+        return 2
+    fi
+    shift
+
+    case "$command_name" in
+        -h|--help)
+            if (( $# > 0 )); then
+                fail "help does not accept arguments"
+                print_usage >&2
+                return 2
+            fi
+            print_usage
+            return 0
+            ;;
+        create|c)
+            if (( $# == 1 )) && [[ "$1" == "-h" || "$1" == "--help" ]]; then
+                print_create_help "$command_name"
+                return 0
+            fi
+            ;;
+        ls)
+            if (( $# == 1 )) && [[ "$1" == "-h" || "$1" == "--help" ]]; then
+                print_list_help
+                return 0
+            fi
+            ;;
+        attach|a)
+            if (( $# == 1 )) && [[ "$1" == "-h" || "$1" == "--help" ]]; then
+                print_attach_help "$command_name"
+                return 0
+            fi
+            ;;
+        *)
+            printf '%s: unknown command: %s\n' \
+                "$PROGRAM_NAME" "$command_name" >&2
+            print_usage >&2
+            return 2
+            ;;
+    esac
+
     if [[ -z "$TMUX_BIN" ]] || [[ ! -x "$TMUX_BIN" ]]; then
         fail "tmux is not available in PATH"
         return
     fi
-    if [[ -z "$command_name" ]]; then
-        print_usage
-        return 2
-    fi
-    shift
 
     case "$command_name" in
         create|c)
@@ -274,12 +384,6 @@ function main {
             ;;
         ls)
             run_list "$@"
-            ;;
-        *)
-            printf '%s: unknown command: %s\n' \
-                "$PROGRAM_NAME" "$command_name" >&2
-            print_usage
-            return 2
             ;;
     esac
 }

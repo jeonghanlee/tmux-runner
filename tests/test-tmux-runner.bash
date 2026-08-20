@@ -2,8 +2,15 @@
 
 set -euo pipefail
 
-TEST_DIR=$(cd -- "$(dirname -- "${BASH_SOURCE[0]}")" && pwd -P)
+TEST_SOURCE=${BASH_SOURCE[0]}
+if [[ "$TEST_SOURCE" == */* ]]; then
+    TEST_SOURCE_DIR=${TEST_SOURCE%/*}
+else
+    TEST_SOURCE_DIR=.
+fi
+TEST_DIR=$(cd -- "$TEST_SOURCE_DIR" && pwd -P)
 readonly TEST_DIR
+unset TEST_SOURCE TEST_SOURCE_DIR
 REPO_ROOT=$(cd -- "$TEST_DIR/.." && pwd -P)
 readonly REPO_ROOT
 readonly RUNNER="$REPO_ROOT/bin/tmux-runner"
@@ -23,19 +30,67 @@ LAST_PTY_RC=0
 LAST_INSIDE_TRACE=""
 LAST_INSIDE_STATUS=""
 NEW_TMUX_ROOT=""
+STATE_MONITOR_PID=""
+STATE_MONITOR_STOP=""
+STATE_MONITOR_REPORT=""
+STATE_MONITOR_READY=""
+STATE_MONITOR_SEQUENCE=0
 TESTS_PASSED=0
 TMUX_ROOTS=()
+EXTRA_PTY_PIDS=()
+EXTRA_PTY_FDS=()
+
+function close_fd_number {
+    local fd_number="$1"
+
+    if [[ "$fd_number" =~ ^[0-9]+$ ]]; then
+        exec {fd_number}>&-
+    fi
+}
+
+function terminate_pty_process {
+    local pid="$1"
+    local deadline=$((SECONDS + 2))
+
+    if [[ ! "$pid" =~ ^[0-9]+$ ]]; then
+        return 0
+    fi
+    if kill -0 "$pid" 2>/dev/null; then
+        kill -TERM -- "-$pid" 2>/dev/null || kill -TERM "$pid" 2>/dev/null
+        while kill -0 "$pid" 2>/dev/null && (( SECONDS <= deadline )); do
+            sleep "$POLL_INTERVAL_SECONDS"
+        done
+        if kill -0 "$pid" 2>/dev/null; then
+            kill -KILL -- "-$pid" 2>/dev/null || kill -KILL "$pid" 2>/dev/null
+        fi
+    fi
+    wait "$pid" 2>/dev/null || true
+}
 
 function cleanup {
     local root=""
     local cleanup_pid=""
+    local extra_pid=""
+    local extra_fd=""
 
     set +e
-    cleanup_pid="$CURRENT_PTY_PID"
-    if [[ -n "$cleanup_pid" ]] && kill -0 "$cleanup_pid" 2>/dev/null; then
-        kill "$cleanup_pid" 2>/dev/null
-        wait "$cleanup_pid" 2>/dev/null
+    if [[ -n "$STATE_MONITOR_PID" ]]; then
+        if [[ -n "$STATE_MONITOR_STOP" ]]; then
+            : > "$STATE_MONITOR_STOP"
+        fi
+        terminate_pty_process "$STATE_MONITOR_PID"
     fi
+    close_current_pty_input
+    for extra_fd in "${EXTRA_PTY_FDS[@]}"; do
+        close_fd_number "$extra_fd"
+    done
+    cleanup_pid="$CURRENT_PTY_PID"
+    if [[ -n "$cleanup_pid" ]]; then
+        terminate_pty_process "$cleanup_pid"
+    fi
+    for extra_pid in "${EXTRA_PTY_PIDS[@]}"; do
+        terminate_pty_process "$extra_pid"
+    done
     for root in "${TMUX_ROOTS[@]}"; do
         env -u TMUX TMUX_TMPDIR="$root" tmux kill-server >/dev/null 2>&1
     done
@@ -45,7 +100,9 @@ function cleanup {
     fi
 }
 
-trap cleanup EXIT INT TERM
+trap cleanup EXIT
+trap 'exit 130' INT
+trap 'exit 143' TERM
 
 function fail_test {
     local message="$1"
@@ -124,14 +181,20 @@ function require_dependencies {
     local dependency=""
     local dependency_path=""
     local -a dependencies=(
-        bash shellcheck tmux script timeout make cmp stat find sort awk grep
-        mkfifo mktemp tee tail hostname
+        bash shellcheck tmux script timeout setsid make install cmp stat find sort
+        awk grep sed tr env mkdir chmod rm mkfifo mktemp tee tail sleep
+        hostname
     )
 
     for dependency in "${dependencies[@]}"; do
         dependency_path=$(type -P "$dependency" || true)
         if [[ -z "$dependency_path" ]] || [[ ! -x "$dependency_path" ]]; then
             fail_test "required command is not executable: $dependency"
+        fi
+    done
+    for dependency_path in /usr/bin/env /bin/bash /bin/sh; do
+        if [[ ! -x "$dependency_path" ]]; then
+            fail_test "required command is not executable: $dependency_path"
         fi
     done
     TMUX_PATH=$(type -P tmux)
@@ -209,7 +272,7 @@ function start_pty_command {
     printf -v command_string '%q ' "$@"
     command_string="${command_string% }"
 
-    env -u TMUX HOME="$home" XDG_CONFIG_HOME="$xdg_home" \
+    setsid env -u TMUX HOME="$home" XDG_CONFIG_HOME="$xdg_home" \
         TMUX_TMPDIR="$root" SHELL=/bin/bash \
         timeout --foreground -k 2s "${PTY_TIMEOUT_SECONDS}s" \
         script -q -e -f -c "$command_string" "$LAST_TRANSCRIPT" \
@@ -334,11 +397,153 @@ function wait_for_client_session {
     return 1
 }
 
+function wait_for_client_count {
+    local root="$1"
+    local expected_session="$2"
+    local expected_count="$3"
+    local client=""
+    local count=0
+    local deadline=$((SECONDS + PTY_TIMEOUT_SECONDS))
+    local -a client_sessions=()
+
+    while (( SECONDS <= deadline )); do
+        mapfile -t client_sessions < <(current_client_sessions "$root")
+        count=0
+        for client in "${client_sessions[@]}"; do
+            if [[ "$client" == "$expected_session" ]]; then
+                count=$((count + 1))
+            fi
+        done
+        if (( count == expected_count )) && \
+            (( ${#client_sessions[@]} == expected_count )); then
+            return 0
+        fi
+        sleep "$POLL_INTERVAL_SECONDS"
+    done
+    return 1
+}
+
 function current_client_sessions {
     local root="$1"
 
     run_tmux "$root" list-clients -F '#{client_session}' 2>/dev/null | \
         LC_ALL=C sort || true
+}
+
+function client_fingerprint {
+    local root="$1"
+
+    run_tmux "$root" list-clients \
+        -F '#{client_pid}|#{client_tty}|#{client_session}' 2>/dev/null | \
+        LC_ALL=C sort
+}
+
+function monitor_state_until_stop {
+    local root="$1"
+    local expected_fingerprint="$2"
+    local expected_clients="$3"
+    local stop_file="$4"
+    local report_file="$5"
+    local ready_file="$6"
+    local actual_fingerprint=""
+    local actual_clients=""
+    local fingerprint_rc=0
+    local clients_rc=0
+    local ready=0
+
+    while true; do
+        fingerprint_rc=0
+        clients_rc=0
+        actual_fingerprint=$(server_fingerprint "$root" 2>/dev/null) || \
+            fingerprint_rc=$?
+        actual_clients=$(client_fingerprint "$root") || clients_rc=$?
+        if (( fingerprint_rc != 0 || clients_rc != 0 )); then
+            {
+                printf 'State query failed.\n'
+                printf 'Fingerprint query exit: %d\n' "$fingerprint_rc"
+                printf 'Client query exit: %d\n' "$clients_rc"
+            } > "$report_file"
+            if (( ! ready )); then
+                printf 'ready\n' > "$ready_file"
+            fi
+            return 0
+        fi
+        if [[ "$actual_fingerprint" != "$expected_fingerprint" ]] || \
+            [[ "$actual_clients" != "$expected_clients" ]]; then
+            {
+                printf 'Expected fingerprint:\n%s\n' "$expected_fingerprint"
+                printf 'Observed fingerprint:\n%s\n' "$actual_fingerprint"
+                printf 'Expected clients:\n%s\n' "$expected_clients"
+                printf 'Observed clients:\n%s\n' "$actual_clients"
+            } > "$report_file"
+            if (( ! ready )); then
+                printf 'ready\n' > "$ready_file"
+            fi
+            return 0
+        fi
+        if (( ! ready )); then
+            printf 'ready\n' > "$ready_file"
+            ready=1
+        fi
+        if [[ -e "$stop_file" ]]; then
+            return 0
+        fi
+        sleep "$POLL_INTERVAL_SECONDS"
+    done
+}
+
+function start_state_monitor {
+    local label="$1"
+    local root="$2"
+    local expected_fingerprint=""
+    local expected_clients=""
+
+    if [[ -n "$STATE_MONITOR_PID" ]]; then
+        fail_test "a state monitor is already active"
+    fi
+    STATE_MONITOR_SEQUENCE=$((STATE_MONITOR_SEQUENCE + 1))
+    STATE_MONITOR_STOP="$WORKSPACE/pty/$label-state-$STATE_MONITOR_SEQUENCE.stop"
+    STATE_MONITOR_REPORT="$WORKSPACE/pty/$label-state-$STATE_MONITOR_SEQUENCE.report"
+    STATE_MONITOR_READY="$WORKSPACE/pty/$label-state-$STATE_MONITOR_SEQUENCE.ready"
+    rm -f -- "$STATE_MONITOR_STOP" "$STATE_MONITOR_READY"
+    : > "$STATE_MONITOR_REPORT"
+    if ! expected_fingerprint=$(server_fingerprint "$root"); then
+        fail_test "$label could not capture the initial server state"
+    fi
+    if ! expected_clients=$(client_fingerprint "$root"); then
+        fail_test "$label could not capture the initial client state"
+    fi
+    monitor_state_until_stop "$root" "$expected_fingerprint" \
+        "$expected_clients" "$STATE_MONITOR_STOP" "$STATE_MONITOR_REPORT" \
+        "$STATE_MONITOR_READY" &
+    STATE_MONITOR_PID=$!
+    if ! wait_for_file "$STATE_MONITOR_READY"; then
+        fail_test "$label state monitor did not become ready"
+    fi
+    if [[ -s "$STATE_MONITOR_REPORT" ]]; then
+        stop_state_monitor "$label"
+    fi
+}
+
+function stop_state_monitor {
+    local label="$1"
+    local monitor_pid="$STATE_MONITOR_PID"
+    local report_file="$STATE_MONITOR_REPORT"
+
+    if [[ -z "$monitor_pid" ]]; then
+        fail_test "no state monitor is active"
+    fi
+    : > "$STATE_MONITOR_STOP"
+    wait "$monitor_pid"
+    STATE_MONITOR_PID=""
+    STATE_MONITOR_STOP=""
+    STATE_MONITOR_REPORT=""
+    STATE_MONITOR_READY=""
+    if [[ -s "$report_file" ]]; then
+        printf 'State monitor report:\n' >&2
+        sed -n '1,160p' "$report_file" >&2
+        fail_test "$label changed tmux state while it was running"
+    fi
 }
 
 function run_outside_success {
@@ -368,9 +573,11 @@ function run_outside_failure {
     local runner="$5"
 
     shift 5
+    start_state_monitor "$label" "$root"
     start_runner_outside "$label" "$root" "$home" "$xdg_home" \
         "$runner" "$@"
     finish_current_pty
+    stop_state_monitor "$label"
     assert_last_pty_failed_without_timeout "$label did not fail cleanly"
 }
 
@@ -388,6 +595,136 @@ function run_outside_syntax_failure {
         "$label called attach-session"
     assert_not_contains "$LAST_TRANSCRIPT" "$TMUX_PATH switch-client" \
         "$label called switch-client"
+}
+
+function run_outside_create_syntax_failure {
+    local label="$1"
+    local root="$2"
+    local home="$3"
+    local xdg_home="$4"
+    local runner="$5"
+
+    shift 5
+    run_outside_failure "$label" "$root" "$home" "$xdg_home" \
+        "$runner" "$@"
+    assert_not_contains "$LAST_TRANSCRIPT" "$TMUX_PATH has-session" \
+        "$label called has-session"
+    assert_not_contains "$LAST_TRANSCRIPT" "$TMUX_PATH new-session" \
+        "$label called new-session"
+    assert_not_contains "$LAST_TRANSCRIPT" "$TMUX_PATH attach-session" \
+        "$label called attach-session"
+    assert_not_contains "$LAST_TRANSCRIPT" "$TMUX_PATH switch-client" \
+        "$label called switch-client"
+}
+
+function run_concurrent_create {
+    local label="$1"
+    local root="$2"
+    local home="$3"
+    local xdg_home="$4"
+    local runner="$5"
+    local session_name="$6"
+    local directory="$7"
+    local barrier_fifo="$WORKSPACE/pty/$label.barrier"
+    local ready_one="$WORKSPACE/pty/$label-one.ready"
+    local ready_two="$WORKSPACE/pty/$label-two.ready"
+    local fifo_one="$WORKSPACE/pty/$label-one.fifo"
+    local fifo_two="$WORKSPACE/pty/$label-two.fifo"
+    local transcript_one="$WORKSPACE/pty/$label-one.typescript"
+    local transcript_two="$WORKSPACE/pty/$label-two.typescript"
+    local console_one="$WORKSPACE/pty/$label-one.console"
+    local console_two="$WORKSPACE/pty/$label-two.console"
+    local command_one=""
+    local command_two=""
+    local barrier_fd=""
+    local fd_one=""
+    local fd_two=""
+    local pid_one=""
+    local pid_two=""
+    local rc_one=0
+    local rc_two=0
+    local recovery_trace=""
+    local recheck_count=0
+    # Positional parameters are expanded by the child Bash process.
+    # shellcheck disable=SC2016
+    local wrapper='printf "ready\n" > "$1"; IFS= read -r < "$2"; shift 2; exec "$@"'
+
+    mkfifo -- "$barrier_fifo" "$fifo_one" "$fifo_two"
+    exec {barrier_fd}<>"$barrier_fifo"
+    EXTRA_PTY_FDS+=("$barrier_fd")
+    printf -v command_one '%q ' bash -c "$wrapper" concurrent-create \
+        "$ready_one" "$barrier_fifo" bash -x "$runner" create \
+        -s "$session_name" -c "$directory"
+    command_one="${command_one% }"
+    printf -v command_two '%q ' bash -c "$wrapper" concurrent-create \
+        "$ready_two" "$barrier_fifo" bash -x "$runner" create \
+        -s "$session_name" -c "$directory"
+    command_two="${command_two% }"
+
+    LAST_TRANSCRIPT="$transcript_one"
+    LAST_CONSOLE="$console_one"
+    setsid env -u TMUX HOME="$home" XDG_CONFIG_HOME="$xdg_home" \
+        TMUX_TMPDIR="$root" SHELL=/bin/bash \
+        timeout --foreground -k 2s "${PTY_TIMEOUT_SECONDS}s" \
+        script -q -e -f -c "$command_one" "$transcript_one" \
+        < "$fifo_one" > "$console_one" 2>&1 &
+    pid_one=$!
+    EXTRA_PTY_PIDS+=("$pid_one")
+    exec {fd_one}>"$fifo_one"
+    EXTRA_PTY_FDS+=("$fd_one")
+
+    setsid env -u TMUX HOME="$home" XDG_CONFIG_HOME="$xdg_home" \
+        TMUX_TMPDIR="$root" SHELL=/bin/bash \
+        timeout --foreground -k 2s "${PTY_TIMEOUT_SECONDS}s" \
+        script -q -e -f -c "$command_two" "$transcript_two" \
+        < "$fifo_two" > "$console_two" 2>&1 &
+    pid_two=$!
+    EXTRA_PTY_PIDS+=("$pid_two")
+    exec {fd_two}>"$fifo_two"
+    EXTRA_PTY_FDS+=("$fd_two")
+
+    if ! wait_for_file "$ready_one" || ! wait_for_file "$ready_two"; then
+        fail_test "$label runners did not reach the release barrier"
+    fi
+    printf '\n\n' >&"$barrier_fd"
+    exec {barrier_fd}>&-
+    if ! wait_for_client_count "$root" "$session_name" 2; then
+        fail_test "$label did not attach both concurrent clients"
+    fi
+    run_tmux "$root" detach-client -s "=$session_name"
+    exec {fd_one}>&-
+    exec {fd_two}>&-
+    wait "$pid_one" || rc_one=$?
+    wait "$pid_two" || rc_two=$?
+    EXTRA_PTY_PIDS=()
+    EXTRA_PTY_FDS=()
+
+    assert_equal "0" "$rc_one" "$label first runner failed"
+    assert_equal "0" "$rc_two" "$label second runner failed"
+    assert_contains "$transcript_one" \
+        "$TMUX_PATH attach-session -t =$session_name" \
+        "$label first runner did not attach exactly"
+    assert_contains "$transcript_two" \
+        "$TMUX_PATH attach-session -t =$session_name" \
+        "$label second runner did not attach exactly"
+    assert_contains "$transcript_one" \
+        "$TMUX_PATH new-session -d -s $session_name" \
+        "$label first runner did not attempt creation"
+    assert_contains "$transcript_two" \
+        "$TMUX_PATH new-session -d -s $session_name" \
+        "$label second runner did not attempt creation"
+    if grep -F -- '+ create_rc=1' "$transcript_one" >/dev/null; then
+        recovery_trace="$transcript_one"
+    elif grep -F -- '+ create_rc=1' "$transcript_two" >/dev/null; then
+        recovery_trace="$transcript_two"
+    else
+        fail_test "$label did not exercise duplicate-create recovery"
+    fi
+    recheck_count=$(grep -Fc -- \
+        "$TMUX_PATH has-session -t =$session_name" "$recovery_trace") || true
+    if (( recheck_count < 2 )); then
+        fail_test "$label loser did not recheck the exact session"
+    fi
 }
 
 function start_source_client {
@@ -477,6 +814,7 @@ function run_inside_failure {
     shift 6
     start_source_client "$label" "$root" "$home" "$xdg_home" \
         "$source_session"
+    start_state_monitor "$label" "$root"
     invoke_runner_inside "$label" "$root" "$home" "$xdg_home" \
         "$source_session" "$runner" "$@"
     if ! wait_for_file "$LAST_INSIDE_STATUS"; then
@@ -484,6 +822,7 @@ function run_inside_failure {
     fi
     status=$(inside_runner_status)
     assert_not_equal "0" "$status" "$label unexpectedly succeeded inside"
+    stop_state_monitor "$label"
     clients=$(current_client_sessions "$root")
     assert_equal "$source_session" "$clients" \
         "$label moved the client after an invalid command"
@@ -571,6 +910,7 @@ function test_t2_create {
     local named_dir=""
     local folder_only_dir=""
     local inside_dir=""
+    local concurrent_dir=""
     local short_hostname=""
     local default_name=""
     local folder_only_name=""
@@ -587,8 +927,9 @@ function test_t2_create {
     named_dir="$WORKSPACE/t2/named-current-folder"
     folder_only_dir="$WORKSPACE/t2/folder-only"
     inside_dir="$WORKSPACE/t2/inside-folder"
+    concurrent_dir="$WORKSPACE/t2/concurrent-folder"
     mkdir -p -- "$home" "$xdg_home" "$default_dir" "$alias_dir" \
-        "$named_dir" "$folder_only_dir" "$inside_dir"
+        "$named_dir" "$folder_only_dir" "$inside_dir" "$concurrent_dir"
 
     socket_path=$(find "$root" -type s -print -quit)
     assert_equal "" "$socket_path" "T2 did not begin without a server socket"
@@ -659,24 +1000,33 @@ function test_t2_create {
     assert_not_contains "$LAST_INSIDE_TRACE" "$TMUX_PATH new-session" \
         "inside reuse created another session"
 
+    run_concurrent_create t2-concurrent "$root" "$home" "$xdg_home" \
+        "$RUNNER" concurrent-session "$concurrent_dir"
+    assert_equal "$concurrent_dir" \
+        "$(pane_directory "$root" concurrent-session)" \
+        "concurrent create used the wrong directory"
+
     fingerprint_before=$(server_fingerprint "$root")
-    run_outside_failure t2-invalid-extra "$root" "$home" "$xdg_home" \
-        "$RUNNER" create extra
+    run_outside_create_syntax_failure t2-invalid-extra "$root" "$home" \
+        "$xdg_home" "$RUNNER" create extra
     assert_equal "$fingerprint_before" "$(server_fingerprint "$root")" \
         "create extra changed server state"
-    run_outside_failure t2-invalid-session-duplicate "$root" "$home" \
-        "$xdg_home" "$RUNNER" create -s alias.session:blue -s named-session
+    run_outside_create_syntax_failure t2-invalid-session-duplicate "$root" \
+        "$home" "$xdg_home" "$RUNNER" create -s alias.session:blue \
+        -s named-session
     assert_equal "$fingerprint_before" "$(server_fingerprint "$root")" \
         "duplicate -s changed server state"
-    run_outside_failure t2-invalid-directory-duplicate "$root" "$home" \
-        "$xdg_home" "$RUNNER" create -c "$alias_dir" -c "$folder_only_dir"
+    run_outside_create_syntax_failure t2-invalid-directory-duplicate "$root" \
+        "$home" "$xdg_home" "$RUNNER" create -c "$alias_dir" \
+        -c "$folder_only_dir"
     assert_equal "$fingerprint_before" "$(server_fingerprint "$root")" \
         "duplicate -c changed server state"
 
     assert_session_set "$root" "T2 session set is wrong" \
         "$default_name" alias_session_blue named-session "$folder_only_name" \
-        prefix-target-long prefix-target source-create inside_new
-    pass_test T2 "create, reuse, exact targets, and inside switching"
+        prefix-target-long prefix-target source-create inside_new \
+        concurrent-session
+    pass_test T2 "create, reuse, concurrent create, and exact switching"
 }
 
 function test_t3_attach {
@@ -707,6 +1057,10 @@ function test_t3_attach {
         "$RUNNER" target a -t target
     run_outside_success t3-a-positional "$root" "$home" "$xdg_home" \
         "$RUNNER" target a target
+    run_outside_success t3-attach-terminator "$root" "$home" "$xdg_home" \
+        "$RUNNER" target attach -- target
+    run_outside_success t3-a-terminator "$root" "$home" "$xdg_home" \
+        "$RUNNER" target a -- target
 
     run_inside_success t3-inside-attach-t "$root" "$home" "$xdg_home" \
         source target "$RUNNER" attach -t target
@@ -718,6 +1072,10 @@ function test_t3_attach {
         source target "$RUNNER" a -t target
     run_inside_success t3-inside-a-positional "$root" "$home" "$xdg_home" \
         source target "$RUNNER" a target
+    run_inside_success t3-inside-attach-terminator "$root" "$home" \
+        "$xdg_home" source target "$RUNNER" attach -- target
+    run_inside_success t3-inside-a-terminator "$root" "$home" "$xdg_home" \
+        source target "$RUNNER" a -- target
 
     run_outside_success t3-dotted-outside "$root" "$home" "$xdg_home" \
         "$RUNNER" dotted_target_blue attach dotted.target:blue
@@ -739,12 +1097,17 @@ function test_t3_attach {
     assert_contains "$LAST_TRANSCRIPT" \
         "tmux-runner attach <session-name>" \
         "attach missing-target guidance omitted positional form"
+    assert_contains "$LAST_TRANSCRIPT" \
+        "tmux-runner attach -- <session-name>" \
+        "attach missing-target guidance omitted terminator form"
     run_outside_syntax_failure t3-invalid-a-empty "$root" "$home" "$xdg_home" \
         "$RUNNER" a
     assert_contains "$LAST_TRANSCRIPT" "tmux-runner a -t <session-name>" \
         "a missing-target guidance omitted -t form"
     assert_contains "$LAST_TRANSCRIPT" "tmux-runner a <session-name>" \
         "a missing-target guidance omitted positional form"
+    assert_contains "$LAST_TRANSCRIPT" "tmux-runner a -- <session-name>" \
+        "a missing-target guidance omitted terminator form"
     run_outside_syntax_failure t3-invalid-attach-mixed "$root" "$home" "$xdg_home" \
         "$RUNNER" attach -t target target
     run_outside_syntax_failure t3-invalid-a-mixed "$root" "$home" "$xdg_home" \
@@ -753,6 +1116,10 @@ function test_t3_attach {
         "$RUNNER" attach target extra
     run_outside_syntax_failure t3-invalid-a-extra "$root" "$home" "$xdg_home" \
         "$RUNNER" a target extra
+    run_outside_syntax_failure t3-invalid-attach-terminator-extra "$root" \
+        "$home" "$xdg_home" "$RUNNER" attach -- target extra
+    run_outside_syntax_failure t3-invalid-a-terminator-extra "$root" "$home" \
+        "$xdg_home" "$RUNNER" a -- target extra
     assert_equal "$fingerprint_before" "$(server_fingerprint "$root")" \
         "outside invalid attach cases changed server state"
 
@@ -768,6 +1135,10 @@ function test_t3_attach {
         "$xdg_home" source "$RUNNER" attach target extra
     run_inside_syntax_failure t3-inside-invalid-a-extra "$root" "$home" \
         "$xdg_home" source "$RUNNER" a target extra
+    run_inside_syntax_failure t3-inside-invalid-attach-terminator-extra \
+        "$root" "$home" "$xdg_home" source "$RUNNER" attach -- target extra
+    run_inside_syntax_failure t3-inside-invalid-a-terminator-extra "$root" \
+        "$home" "$xdg_home" source "$RUNNER" a -- target extra
     assert_equal "$fingerprint_before" "$(server_fingerprint "$root")" \
         "inside invalid attach cases changed server state"
 
@@ -880,6 +1251,7 @@ function test_t4_list {
         "inside ls did not use the exact switch target"
 
     fingerprint_before=$(server_fingerprint "$selected_root")
+    start_state_monitor t4-invalid-text "$selected_root"
     start_runner_outside t4-invalid-text "$selected_root" "$home" "$xdg_home" \
         "$RUNNER" ls
     if ! wait_for_transcript_text "Select session:"; then
@@ -887,7 +1259,9 @@ function test_t4_list {
     fi
     send_current_input 'not-a-number\n'
     finish_current_pty
+    stop_state_monitor t4-invalid-text
     assert_last_pty_failed_without_timeout "nonnumeric ls input"
+    start_state_monitor t4-invalid-range "$selected_root"
     start_runner_outside t4-invalid-range "$selected_root" "$home" "$xdg_home" \
         "$RUNNER" ls
     if ! wait_for_transcript_text "Select session:"; then
@@ -895,6 +1269,7 @@ function test_t4_list {
     fi
     send_current_input '18446744073709551617\n'
     finish_current_pty
+    stop_state_monitor t4-invalid-range
     assert_last_pty_failed_without_timeout "out-of-range ls input"
     assert_equal "$fingerprint_before" "$(server_fingerprint "$selected_root")" \
         "invalid ls input changed server state"
@@ -914,6 +1289,7 @@ function test_t5_completion {
     create_tmux_root t5-other
     other_root="$NEW_TMUX_ROOT"
     run_tmux "$selected_root" -f /dev/null new-session -d -s alpha
+    run_tmux "$selected_root" new-session -d -s -dash
     run_tmux "$other_root" -f /dev/null new-session -d -s beta
     completion_dir="$WORKSPACE/t5/completion-dir"
     mkdir -p -- "$completion_dir/work-dir"
@@ -929,24 +1305,28 @@ function test_t5_completion {
     COMP_CWORD=1
     _tmux_runner
     assert_reply_set "command completion set is wrong" \
-        create c ls attach a
+        create c ls attach a -h --help
 
     COMP_WORDS=(tmux-runner create -)
     COMP_CWORD=2
     _tmux_runner
-    assert_reply_set "create option completion set is wrong" -s -c
+    assert_reply_set "create option completion set is wrong" -s -c -h --help
     COMP_WORDS=(tmux-runner c -)
     COMP_CWORD=2
     _tmux_runner
-    assert_reply_set "c option completion set is wrong" -s -c
+    assert_reply_set "c option completion set is wrong" -s -c -h --help
+    COMP_WORDS=(tmux-runner ls -)
+    COMP_CWORD=2
+    _tmux_runner
+    assert_reply_set "ls option completion set is wrong" -h --help
     COMP_WORDS=(tmux-runner attach -)
     COMP_CWORD=2
     _tmux_runner
-    assert_reply_set "attach option completion set is wrong" -t
+    assert_reply_set "attach option completion set is wrong" -t -h --help
     COMP_WORDS=(tmux-runner a -)
     COMP_CWORD=2
     _tmux_runner
-    assert_reply_set "a option completion set is wrong" -t
+    assert_reply_set "a option completion set is wrong" -t -h --help
 
     pushd "$completion_dir" >/dev/null
     COMP_WORDS=(tmux-runner create -c work-)
@@ -975,6 +1355,30 @@ function test_t5_completion {
     COMP_CWORD=2
     _tmux_runner
     assert_reply_set "a positional completion set is wrong" alpha
+    COMP_WORDS=(tmux-runner attach -- a)
+    COMP_CWORD=3
+    _tmux_runner
+    assert_reply_set "attach terminator completion set is wrong" alpha
+    COMP_WORDS=(tmux-runner a -- a)
+    COMP_CWORD=3
+    _tmux_runner
+    assert_reply_set "a terminator completion set is wrong" alpha
+    COMP_WORDS=(tmux-runner attach -t -)
+    COMP_CWORD=3
+    _tmux_runner
+    assert_reply_set "attach -t dash session completion is wrong" -dash
+    COMP_WORDS=(tmux-runner a -t -)
+    COMP_CWORD=3
+    _tmux_runner
+    assert_reply_set "a -t dash session completion is wrong" -dash
+    COMP_WORDS=(tmux-runner attach -- -)
+    COMP_CWORD=3
+    _tmux_runner
+    assert_reply_set "attach terminator dash completion is wrong" -dash
+    COMP_WORDS=(tmux-runner a -- -)
+    COMP_CWORD=3
+    _tmux_runner
+    assert_reply_set "a terminator dash completion is wrong" -dash
 
     pass_test T5 "command, option, directory, and selected-UDS completion"
 }
@@ -990,7 +1394,7 @@ function test_t6_install {
 
     create_tmux_root t6
     root="$NEW_TMUX_ROOT"
-    home="$WORKSPACE/t6/home"
+    home="$WORKSPACE/t6/home with space"
     xdg_home="$WORKSPACE/t6/xdg"
     mkdir -p -- "$home" "$xdg_home"
     installed_runner="$home/.local/bin/tmux-runner"
@@ -1027,6 +1431,16 @@ function test_t7_documentation {
         "README omits create syntax"
     assert_contains "$README" "tmux-runner attach -t" \
         "README omits attach -t syntax"
+    assert_contains "$README" "tmux-runner attach --" \
+        "README omits attach terminator syntax"
+    assert_contains "$README" "tmux-runner --help" \
+        "README omits top-level help"
+    assert_contains "$README" "tmux-runner create --help" \
+        "README omits command help"
+    assert_contains "$README" "tmux-runner ls --help" \
+        "README omits ls help"
+    assert_contains "$README" "tmux-runner attach --help" \
+        "README omits attach help"
     assert_contains "$README" "replaces \`.\` and \`:\` with \`_\`" \
         "README omits name normalization"
     assert_contains "$README" "exact-match \`=\` prefix" \
@@ -1042,14 +1456,107 @@ function test_t7_documentation {
         "README omits completion install path"
     assert_contains "$README" "make install" \
         "README omits the install command"
+    assert_contains "$README" "command -v bash" \
+        "README omits the Bash requirement check"
+    assert_contains "$README" "command -v tmux" \
+        "README omits the tmux requirement check"
+    assert_contains "$README" "command -v hostname" \
+        "README omits the hostname requirement check"
+    assert_contains "$README" "command -v make" \
+        "README omits the Make requirement check"
+    assert_contains "$README" "command -v install" \
+        "README omits the install requirement check"
+    assert_contains "$README" "bash --version" \
+        "README omits the Bash version check"
+    assert_contains "$README" "make --version" \
+        "README omits the Make version check"
+    assert_contains "$README" "export PATH=\"\$HOME/.local/bin:\$PATH\"" \
+        "README omits current-shell PATH preparation"
+    assert_contains "$README" 'make HOME="/path/to/home" install' \
+        "README test-home install command does not quote HOME"
+    assert_contains "$README" 'make -n HOME="/path/to/home" install' \
+        "README test-home dry-run command does not quote HOME"
     assert_contains "$README" "From the repository root" \
         "README omits the install working directory"
     assert_contains "$README" \
         "source ~/.local/share/bash-completion/completions/tmux-runner" \
         "README omits current-shell completion registration"
+    assert_contains "$README" "cd /path/to/repository" \
+        "README omits the first-use working directory"
+    assert_contains "$README" "Ctrl-b" \
+        "README omits the first-use detach sequence"
     assert_not_contains "$README" "systemd" \
         "README documents out-of-scope service management"
     pass_test T7 "shipped behavior and data-flow documentation"
+}
+
+function run_help_case {
+    local label="$1"
+    local expected_usage="$2"
+    local stdout_file="$WORKSPACE/t8/$label.stdout"
+    local stderr_file="$WORKSPACE/t8/$label.stderr"
+    local rc=0
+
+    shift 2
+    env PATH=/nonexistent /bin/bash "$RUNNER" "$@" \
+        > "$stdout_file" 2> "$stderr_file" || rc=$?
+    assert_equal "0" "$rc" "$label help returned nonzero"
+    if [[ -s "$stderr_file" ]]; then
+        fail_test "$label help wrote to stderr"
+    fi
+    assert_contains "$stdout_file" "$expected_usage" \
+        "$label help omitted its usage"
+    assert_contains "$stdout_file" "-h, --help" \
+        "$label help omitted its help options"
+}
+
+function test_t8_help {
+    local rc=0
+    local output_file="$WORKSPACE/t8/invalid.stdout"
+    local error_file="$WORKSPACE/t8/invalid.stderr"
+
+    mkdir -p -- "$WORKSPACE/t8"
+    run_help_case top-short "Usage:" -h
+    run_help_case top-long "Commands:" --help
+    run_help_case create-short "Usage: tmux-runner create" create -h
+    run_help_case create-long "Usage: tmux-runner create" create --help
+    run_help_case c-short "Usage: tmux-runner c" c -h
+    run_help_case c-long "Usage: tmux-runner c" c --help
+    run_help_case list-short "Usage: tmux-runner ls" ls -h
+    run_help_case list-long "Usage: tmux-runner ls" ls --help
+    run_help_case attach-short "Usage: tmux-runner attach" attach -h
+    run_help_case attach-long "Usage: tmux-runner attach" attach --help
+    run_help_case a-short "Usage: tmux-runner a" a -h
+    run_help_case a-long "Usage: tmux-runner a" a --help
+
+    assert_contains "$WORKSPACE/t8/top-long.stdout" "create, c" \
+        "top-level help omitted the create command summary"
+    assert_contains "$WORKSPACE/t8/top-long.stdout" "attach, a" \
+        "top-level help omitted the attach command summary"
+    assert_contains "$WORKSPACE/t8/create-long.stdout" "-s <session-name>" \
+        "create help omitted the session option"
+    assert_contains "$WORKSPACE/t8/create-long.stdout" "-c <folder>" \
+        "create help omitted the folder option"
+    assert_contains "$WORKSPACE/t8/create-long.stdout" \
+        "<folder>-<short-hostname>" \
+        "create help omitted the default session name"
+    assert_contains "$WORKSPACE/t8/list-long.stdout" "select one by number" \
+        "ls help omitted selection behavior"
+    assert_contains "$WORKSPACE/t8/attach-long.stdout" \
+        "-- <session-name>" \
+        "attach help omitted the option terminator form"
+    assert_contains "$WORKSPACE/t8/attach-long.stdout" \
+        "exact name" \
+        "attach help omitted exact-name behavior"
+
+    env PATH=/nonexistent /bin/bash "$RUNNER" --help extra \
+        > "$output_file" 2> "$error_file" || rc=$?
+    assert_equal "2" "$rc" "help with an extra argument returned the wrong status"
+    assert_contains "$error_file" "help does not accept arguments" \
+        "help with an extra argument omitted its error"
+    assert_not_contains "$error_file" "tmux is not available" \
+        "help validated tmux before its own arguments"
+    pass_test T8 "dependency-free top-level and command help"
 }
 
 function main {
@@ -1064,6 +1571,7 @@ function main {
     test_t5_completion
     test_t6_install
     test_t7_documentation
+    test_t8_help
     printf 'PASS: %d milestone checks completed\n' "$TESTS_PASSED"
 }
 
