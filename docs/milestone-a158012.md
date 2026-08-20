@@ -13,7 +13,7 @@ Canonical branch or ref: master
 Git upstream: origin/master
 Remote tracker: none
 
-Next session entry point: prepare the M1 commit under separate `git-workflow` authority, then record its carrying commit.
+Next session entry point: no open milestone or backlog item; create a new canonical plan before further implementation.
 
 ## Milestone
 
@@ -21,7 +21,7 @@ Next session entry point: prepare the M1 commit under separate `git-workflow` au
 
 | Group | ID | Work unit | Type | Status | Ready | Deps | Done when / Evidence |
 | --- | --- | --- | --- | --- | --- | --- | --- |
-| Core | M1 | Deliver the local tmux runner | Milestone | Complete | No | D1, D2, D3, D4, D5, D6, D7, D8, D9 | Deliverables exist and M1 / T1 through M1 / T7 pass; [detail](#m1---deliver-the-local-tmux-runner) |
+| Core | M1 | Deliver the local tmux runner | Milestone | Complete | No | D1, D2, D3, D4, D5, D6, D7, D8, D9 | Complete 2026-08-19, commit `fa1658e`; T1-T7 passed through the shipped Bash files, real tmux 3.5a, selected UDS roots, `script(1)` PTYs, and FIFOs; [detail](#m1---deliver-the-local-tmux-runner) |
 
 Milestone tally: Complete 1.
 
@@ -130,7 +130,7 @@ Superseded Plan Artifacts: none
 - 2026-08-19: The third-person execution review accepted M1 after every syntax-invalid T3 trace and the test dependency list were corrected; independent symlink-directory, cold-error, dry-run, completion-registration, and socket-file checks passed.
 - 2026-08-19: The second-person reader pass accepted the README after repository-root, `PATH`, and current-shell completion guidance were added and executed against an empty temporary home.
 - 2026-08-19: The final real-path suite completed M1 / T1 through M1 / T7 with seven passes and no remaining external gate.
-- Carrying commit: pending separate `git-workflow` authority.
+- Carrying commit: `fa1658ef4cf29c9c781856d84ad1f65da6ff798f` (`Add local tmux session runner`).
 
 ## Backlog
 
