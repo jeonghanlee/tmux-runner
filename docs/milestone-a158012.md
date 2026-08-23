@@ -13,7 +13,8 @@ Canonical branch or ref: master
 Git upstream: origin/master
 Remote tracker: none
 
-Next session entry point: no open milestone or backlog item; create a new canonical plan before further implementation.
+Next session entry point: prepare the M2 carrying commit after commit
+delegation.
 
 ## Milestone
 
@@ -22,8 +23,9 @@ Next session entry point: no open milestone or backlog item; create a new canoni
 | Group | ID | Work unit | Type | Status | Ready | Deps | Done when / Evidence |
 | --- | --- | --- | --- | --- | --- | --- | --- |
 | Core | M1 | Deliver the local tmux runner | Milestone | Complete | No | D1, D2, D3, D4, D5, D6, D7, D8, D9, D10 | Complete 2026-08-20, correction commit `ede2b62`; corrected T1-T8, third-person review, and final second-person reader pass accepted; [detail](#m1---deliver-the-local-tmux-runner) |
+| Version | M2 | Add source and installed version identity | Milestone | In progress | No | M1, D11, D12 | `-V` and `--version` report version `0.1.0`; source runs show live Git identity, user installs retain injected Git and date metadata, and the real-path suite passes; [detail](#m2---add-source-and-installed-version-identity) |
 
-Milestone tally: Complete 1.
+Milestone tally: Complete 1, In progress 1.
 
 ### Decisions
 
@@ -39,6 +41,8 @@ Milestone tally: Complete 1.
 | D8 | Use the tmux CLI as the only session interface: normal runs inherit tmux's selected UDS, test setup clears any inherited `TMUX` and selects an isolated UDS with `TMUX_TMPDIR`, the cold-start test uses empty `HOME` and `XDG_CONFIG_HOME`, prestarted test servers use a first `tmux -f /dev/null` command, inside-client tests use the new client's `TMUX`, and the runner never enumerates socket files directly. | 2026-08-19 |
 | D9 | Normalize every CLI-supplied or derived session name by replacing `.` and `:` with `_`, and pass every internal tmux target-session argument as `=<normalized-name>` so lookup and connection require an exact session name. | 2026-08-19 |
 | D10 | Provide `-h` and `--help` at the top level and for `create`, `c`, `ls`, `attach`, and `a`; valid help writes to standard output, exits 0, and does not require tmux in `PATH`; do not add a `help` command. | 2026-08-19 |
+| D11 | Set the runner version to `0.1.0`; add the `epics-ioc-runner` source and installed metadata behavior without copying its modular Make structure; keep the version value only in `bin/tmux-runner`, resolve live Git identity for source runs, and inject Git hash, commit date, and install date into the user-installed copy. | 2026-08-22 |
+| D12 | Use the proven `epics-ioc-runner` content comparison, `git diff --quiet HEAD --`, for both live and installed dirty-state detection; verify relocated clean, modified, and read-only-index copies through real Git. | 2026-08-22 |
 
 ### Milestone Details
 
@@ -150,6 +154,109 @@ Superseded Plan Artifacts: none
 - 2026-08-20: The second-person reader pass found that First Use omitted the detach step required before exact reuse and that the requirement checks did not verify Bash or GNU Make versions; the accepted corrections add both reader-visible steps.
 - 2026-08-20: A fresh second-person reader accepted the corrected README after executing requirement version checks, installation, `PATH`, completion, create, documented detach, and exact reuse without another finding.
 - Correction commit: `ede2b62c478b0f7d87a93c7c55b5ee0323740abf` (`Harden tmux runner behavior and help`).
+
+#### M2 - Add source and installed version identity
+
+Origin: a158012 / M2
+Identity History: none
+GitHub Issue: none
+Status: In progress
+
+##### Summary
+
+Give the source runner and its user-installed copy one observable version
+contract. Source execution resolves the current Git identity without changing
+the repository, while installation stamps immutable Git and UTC date metadata
+into the copied runner.
+
+##### Scope
+
+- Set version `0.1.0` in `bin/tmux-runner` as the single version value.
+- Add dependency-free `-V` and `--version` forms with version, Git hash,
+  commit date, and install date output.
+- Mark source checkout output as live and add `-dirty` when tracked content
+  differs from `HEAD`.
+- Use `git diff --quiet HEAD --` so relocated clean checkouts and read-only
+  indexes retain a bare hash while real tracked changes remain dirty.
+- Add `configure/inject-runner-version.bash` to stamp the installed copy.
+- Invoke the injector from the existing local `make install` path without
+  adding another installed file.
+- Extend Bash completion, README requirements and usage, and the real-path
+  test suite for source and installed metadata.
+
+Out of scope: Git tag creation, GitHub release execution, a modular
+`configure/` Make system, copying `configure/RELEASE`, untracked-file dirty
+detection, and changing the existing tmux session behavior.
+
+##### Completion Criteria
+
+- `tmux-runner -V` and `tmux-runner --version` return the same three-line
+  output and report version `0.1.0` before tmux dependency validation.
+- Relocated clean and read-only-index Git fixtures report their bare short
+  hash with `(live)`, while a real tracked modification adds `-dirty`.
+- A user-installed copy reports the source hash without `(live)`, the source
+  commit date in UTC, and an installation timestamp within the install run.
+- Installation still writes only the runner and completion files with the
+  existing modes, and the installed runner differs from the source only in
+  the three injected metadata declarations.
+- Help, completion, README, static checks, and the existing tmux UDS and PTY
+  behavior all pass through the shipped files.
+
+##### Dependencies And Decisions
+
+- M1, D11, and D12.
+
+##### Implementation Plan
+
+Plan Status: accepted
+Plan Acceptance: 2026-08-22 - selected the source and installed metadata
+behavior without the modular Make structure, then selected version `0.1.0`.
+Implementation Authorization: 2026-08-22 - requested that the selected
+version-management behavior be copied into this repository.
+Superseded Plan Artifacts: none
+
+1. Add one version value and three injectable metadata declarations to the
+   runner, then implement strict `-V` and `--version` handling before tmux
+   validation.
+2. Add a user-mode metadata injector and call it after the runner copy in
+   `make install`.
+3. Extend completion, README, and the existing integration suite with
+   relocated clean, modified, and read-only-index Git fixtures plus
+   installed-copy verification.
+4. Run the complete shipped suite, perform the stage review cycle, and record
+   the carrying commit in the next milestone update.
+
+##### Test Plan
+
+| Label | Layer | Method | Environment | Expected Result |
+| --- | --- | --- | --- | --- |
+| T1 | Static | Run Bash syntax checks and ShellCheck on the runner, completion, injector, and test suite. | Repository checkout | Every shipped Bash file returns 0 with no finding. |
+| T2 | Source identity | Execute both version forms from an unrelated directory, then commit the shipped runner once and copy that Git repository without another Git operation into clean, modified, and read-only-index fixtures. | Real Git repository with relocated copies and copied shipped runner | Both forms agree; relocated clean and read-only-index runners use a bare live hash, while the modified runner adds `-dirty`. |
+| T3 | Installed identity | Run the shipped Makefile into a spaced temporary home and run the injector against relocated clean, modified, and read-only-index real Git fixtures. | Temporary home and real relocated Git fixtures | The installed copy retains version `0.1.0`; clean and read-only-index copies use the bare source hash, the modified copy uses `-dirty`, and commit and install dates remain correct without changing non-metadata content. |
+| T4 | Dependency boundary | Run version output and invalid version syntax with neither tmux, hostname, Git, nor date in `PATH`. | Dependency-free `PATH` with `/bin/bash` | Valid version output returns 0 with fallback metadata; extra arguments return 2 with the version syntax error before tmux validation. |
+| T5 | Regression integration | Run the complete shipped test suite through real isolated tmux servers, UDS roots, PTYs, installation, completion, documentation, and Git fixtures. | Linux user environment with real tmux, Git, GNU Make, and `script(1)` | Existing behavior and all version paths pass, and cleanup leaves no test server or workspace. |
+
+##### Verification Results
+
+| Label | Observed At | Environment | Result | Evidence |
+| --- | --- | --- | --- | --- |
+| T1 | 2026-08-22T13:39:43-07:00 | Repository checkout with Bash 5.2 and ShellCheck 0.10.0 | Pass | The final-state suite reported `PASS T1`; Bash syntax checks and ShellCheck returned 0 for the runner, completion, injector, and test script. |
+| T2 | 2026-08-22T13:39:43-07:00 | Source checkout plus relocated clean, modified, and read-only-index real Git fixtures | Pass | `-V` and `--version` agreed from an unrelated directory; relocated clean and read-only-index copies reported the bare hash with `(live)`, while the tracked modification reported `-dirty (live)`. |
+| T3 | 2026-08-22T13:39:43-07:00 | Spaced temporary home plus relocated clean, modified, and read-only-index real Git fixtures | Pass | The final-state suite reported `PASS T6` and `PASS T9`; installed copies retained the expected bare or dirty hash, source commit date, in-range install date, file modes, and non-metadata content. |
+| T4 | 2026-08-22T13:39:43-07:00 | `/bin/bash` with dependency-free `PATH` | Pass | Version `0.1.0` printed with fallback metadata and exit 0; an extra argument returned 2 with the version syntax error before tmux validation. |
+| T5 | 2026-08-22T13:39:43-07:00 | Real tmux 3.5a servers, isolated UDS roots, PTYs, relocated Git fixtures, and spaced-home installation | Pass | The shipped suite reported `PASS T1` through `PASS T9` and `PASS: 9 milestone checks completed`; no test server or workspace remained. |
+
+##### Closure Evidence
+
+- 2026-08-22: The first-person retrospective confirmed the selected version
+  and install scope after metadata-anchor failures were made explicit.
+- 2026-08-22: The third-person execution review accepted the source and
+  installed Git comparison after relocated clean, modified, and read-only-index
+  fixtures passed through the real shipped paths.
+- 2026-08-22: The second-person reader pass accepted the README after its
+  requirement checks, dry run, spaced-path installation, installed version,
+  file modes, and completion registration all matched a new temporary home.
+- Carrying commit: pending.
 
 ## Backlog
 

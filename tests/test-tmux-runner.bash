@@ -15,6 +15,7 @@ REPO_ROOT=$(cd -- "$TEST_DIR/.." && pwd -P)
 readonly REPO_ROOT
 readonly RUNNER="$REPO_ROOT/bin/tmux-runner"
 readonly COMPLETION="$REPO_ROOT/bin/tmux-runner-completion.bash"
+readonly VERSION_INJECTOR="$REPO_ROOT/configure/inject-runner-version.bash"
 readonly README="$REPO_ROOT/README.md"
 readonly PTY_TIMEOUT_SECONDS=12
 readonly POLL_INTERVAL_SECONDS=0.05
@@ -96,6 +97,7 @@ function cleanup {
     done
     if [[ -n "$WORKSPACE" ]] && [[ -d "$WORKSPACE" ]] && \
         [[ "$WORKSPACE" == /tmp/tmux-runner-test.* ]]; then
+        chmod -R u+w -- "$WORKSPACE" 2>/dev/null || true
         rm -rf -- "$WORKSPACE"
     fi
 }
@@ -183,7 +185,7 @@ function require_dependencies {
     local -a dependencies=(
         bash shellcheck tmux script timeout setsid make install cmp stat find sort
         awk grep sed tr env mkdir chmod rm mkfifo mktemp tee tail sleep
-        hostname
+        hostname git date cp
     )
 
     for dependency in "${dependencies[@]}"; do
@@ -895,9 +897,12 @@ function assert_rows_visible {
 function test_t1_static {
     assert_command_succeeds "runner Bash syntax failed" bash -n "$RUNNER"
     assert_command_succeeds "completion Bash syntax failed" bash -n "$COMPLETION"
+    assert_command_succeeds "version injector Bash syntax failed" \
+        bash -n "$VERSION_INJECTOR"
     assert_command_succeeds "test Bash syntax failed" bash -n "$TEST_DIR/test-tmux-runner.bash"
     assert_command_succeeds "ShellCheck reported a finding" \
-        shellcheck "$RUNNER" "$COMPLETION" "$TEST_DIR/test-tmux-runner.bash"
+        shellcheck "$RUNNER" "$COMPLETION" "$VERSION_INJECTOR" \
+        "$TEST_DIR/test-tmux-runner.bash"
     pass_test T1 "Bash syntax and ShellCheck"
 }
 
@@ -1305,7 +1310,7 @@ function test_t5_completion {
     COMP_CWORD=1
     _tmux_runner
     assert_reply_set "command completion set is wrong" \
-        create c ls attach a -h --help
+        create c ls attach a -V --version -h --help
 
     COMP_WORDS=(tmux-runner create -)
     COMP_CWORD=2
@@ -1391,6 +1396,16 @@ function test_t6_install {
     local installed_completion=""
     local inventory=""
     local expected_inventory=""
+    local source_normalized=""
+    local installed_normalized=""
+    local version_output=""
+    local expected_hash=""
+    local commit_timestamp=""
+    local expected_commit_date=""
+    local install_date=""
+    local install_epoch=0
+    local install_before=0
+    local install_after=0
 
     create_tmux_root t6
     root="$NEW_TMUX_ROOT"
@@ -1399,9 +1414,13 @@ function test_t6_install {
     mkdir -p -- "$home" "$xdg_home"
     installed_runner="$home/.local/bin/tmux-runner"
     installed_completion="$home/.local/share/bash-completion/completions/tmux-runner"
+    source_normalized="$WORKSPACE/t6/source.normalized"
+    installed_normalized="$WORKSPACE/t6/installed.normalized"
 
+    install_before=$(date -u '+%s')
     assert_command_succeeds "make install failed" \
         make -C "$REPO_ROOT" HOME="$home" install
+    install_after=$(date -u '+%s')
     inventory=$(find "$home" \( -type f -o -type l \) -print | LC_ALL=C sort)
     expected_inventory=$(printf '%s\n%s\n' \
         "$installed_runner" "$installed_completion" | LC_ALL=C sort)
@@ -1411,11 +1430,44 @@ function test_t6_install {
         "installed runner mode is wrong"
     assert_equal "0644" "0$(stat -c '%a' "$installed_completion")" \
         "installed completion mode is wrong"
-    assert_command_succeeds "installed runner differs from shipped runner" \
-        cmp -s "$RUNNER" "$installed_runner"
+    sed -e 's/^readonly RUNNER_GIT_HASH=.*/readonly RUNNER_GIT_HASH="normalized"/' \
+        -e 's/^readonly RUNNER_COMMIT_DATE=.*/readonly RUNNER_COMMIT_DATE="normalized"/' \
+        -e 's/^readonly RUNNER_INSTALL_DATE=.*/readonly RUNNER_INSTALL_DATE="normalized"/' \
+        "$RUNNER" > "$source_normalized"
+    sed -e 's/^readonly RUNNER_GIT_HASH=.*/readonly RUNNER_GIT_HASH="normalized"/' \
+        -e 's/^readonly RUNNER_COMMIT_DATE=.*/readonly RUNNER_COMMIT_DATE="normalized"/' \
+        -e 's/^readonly RUNNER_INSTALL_DATE=.*/readonly RUNNER_INSTALL_DATE="normalized"/' \
+        "$installed_runner" > "$installed_normalized"
+    assert_command_succeeds \
+        "installed runner differs outside injected metadata" \
+        cmp -s "$source_normalized" "$installed_normalized"
     assert_command_succeeds \
         "installed completion differs from shipped completion" \
         cmp -s "$COMPLETION" "$installed_completion"
+
+    expected_hash=$(git -C "$REPO_ROOT" rev-parse --short HEAD)
+    if ! git -C "$REPO_ROOT" diff --quiet HEAD --; then
+        expected_hash="${expected_hash}-dirty"
+    fi
+    commit_timestamp=$(git -C "$REPO_ROOT" show -s --format=%ct HEAD)
+    expected_commit_date=$(
+        date -u -d "@${commit_timestamp}" '+%Y-%m-%dT%H:%M:%SZ'
+    )
+    version_output=$(env PATH=/nonexistent /bin/bash \
+        "$installed_runner" --version)
+    assert_equal "tmux-runner version 0.1.0 (${expected_hash})" \
+        "${version_output%%$'\n'*}" \
+        "installed runner reported the wrong version or Git hash"
+    assert_equal "$expected_commit_date" \
+        "$(printf '%s\n' "$version_output" | sed -n 's/^commit date:  //p')" \
+        "installed runner reported the wrong commit date"
+    install_date=$(
+        printf '%s\n' "$version_output" | sed -n 's/^install date: //p'
+    )
+    install_epoch=$(date -u -d "$install_date" '+%s')
+    if (( install_epoch < install_before || install_epoch > install_after )); then
+        fail_test "installed runner reported an out-of-range install date"
+    fi
 
     run_tmux "$root" -f /dev/null new-session -d -s install-target
     run_outside_success t6-installed-attach "$root" "$home" "$xdg_home" \
@@ -1435,6 +1487,8 @@ function test_t7_documentation {
         "README omits attach terminator syntax"
     assert_contains "$README" "tmux-runner --help" \
         "README omits top-level help"
+    assert_contains "$README" "tmux-runner --version" \
+        "README omits version output"
     assert_contains "$README" "tmux-runner create --help" \
         "README omits command help"
     assert_contains "$README" "tmux-runner ls --help" \
@@ -1466,6 +1520,12 @@ function test_t7_documentation {
         "README omits the Make requirement check"
     assert_contains "$README" "command -v install" \
         "README omits the install requirement check"
+    assert_contains "$README" "command -v git" \
+        "README omits the Git requirement check"
+    assert_contains "$README" "command -v date" \
+        "README omits the date requirement check"
+    assert_contains "$README" "command -v sed" \
+        "README omits the sed requirement check"
     assert_contains "$README" "bash --version" \
         "README omits the Bash version check"
     assert_contains "$README" "make --version" \
@@ -1533,6 +1593,8 @@ function test_t8_help {
         "top-level help omitted the create command summary"
     assert_contains "$WORKSPACE/t8/top-long.stdout" "attach, a" \
         "top-level help omitted the attach command summary"
+    assert_contains "$WORKSPACE/t8/top-long.stdout" "-V, --version" \
+        "top-level help omitted the version options"
     assert_contains "$WORKSPACE/t8/create-long.stdout" "-s <session-name>" \
         "create help omitted the session option"
     assert_contains "$WORKSPACE/t8/create-long.stdout" "-c <folder>" \
@@ -1559,6 +1621,160 @@ function test_t8_help {
     pass_test T8 "dependency-free top-level and command help"
 }
 
+function test_t9_version {
+    local expected_hash=""
+    local commit_timestamp=""
+    local expected_commit_date=""
+    local short_output=""
+    local long_output=""
+    local no_git_output=""
+    local fixture_seed="$WORKSPACE/t9/seed"
+    local seed_runner="$WORKSPACE/t9/seed/bin/tmux-runner"
+    local clean_repository="$WORKSPACE/t9/relocated-clean"
+    local clean_runner="$WORKSPACE/t9/relocated-clean/bin/tmux-runner"
+    local modified_repository="$WORKSPACE/t9/relocated-modified"
+    local modified_runner="$WORKSPACE/t9/relocated-modified/bin/tmux-runner"
+    local locked_repository="$WORKSPACE/t9/relocated-locked"
+    local locked_runner="$WORKSPACE/t9/relocated-locked/bin/tmux-runner"
+    local fixture_hash=""
+    local fixture_output=""
+    local clean_installed="$WORKSPACE/t9/clean-install/tmux-runner"
+    local dirty_installed="$WORKSPACE/t9/dirty-install/tmux-runner"
+    local locked_installed="$WORKSPACE/t9/locked-install/tmux-runner"
+    local missing_anchor="$WORKSPACE/t9/missing-anchor/tmux-runner"
+    local duplicate_anchor="$WORKSPACE/t9/duplicate-anchor/tmux-runner"
+    local stdout_file="$WORKSPACE/t9/invalid.stdout"
+    local stderr_file="$WORKSPACE/t9/invalid.stderr"
+    local rc=0
+
+    mkdir -p -- "$WORKSPACE/t9/unrelated" "$fixture_seed/bin" \
+        "${clean_installed%/*}" "${dirty_installed%/*}" \
+        "${locked_installed%/*}" "${missing_anchor%/*}" \
+        "${duplicate_anchor%/*}"
+    expected_hash=$(git -C "$REPO_ROOT" rev-parse --short HEAD)
+    if ! git -C "$REPO_ROOT" diff --quiet HEAD --; then
+        expected_hash="${expected_hash}-dirty"
+    fi
+    commit_timestamp=$(git -C "$REPO_ROOT" show -s --format=%ct HEAD)
+    expected_commit_date=$(
+        date -u -d "@${commit_timestamp}" '+%Y-%m-%dT%H:%M:%SZ'
+    )
+
+    short_output=$(cd -- "$WORKSPACE/t9/unrelated" && "$RUNNER" -V)
+    long_output=$(cd -- "$WORKSPACE/t9/unrelated" && "$RUNNER" --version)
+    assert_equal "$short_output" "$long_output" \
+        "short and long version forms differ"
+    assert_equal "tmux-runner version 0.1.0 (${expected_hash} (live))" \
+        "${long_output%%$'\n'*}" \
+        "source runner reported the wrong live version or Git hash"
+    assert_equal "$expected_commit_date" \
+        "$(printf '%s\n' "$long_output" | sed -n 's/^commit date:  //p')" \
+        "source runner reported the wrong live commit date"
+    assert_equal "live" \
+        "$(printf '%s\n' "$long_output" | sed -n 's/^install date: //p')" \
+        "source runner did not identify its live install state"
+
+    # Commit once, then copy without running Git in the copies. The relocated
+    # files have new inodes while the copied index retains its cached stat
+    # data, which distinguishes a content diff from an index-only verdict.
+    cp "$RUNNER" "$seed_runner"
+    git -C "$fixture_seed" init -q
+    git -C "$fixture_seed" add bin/tmux-runner
+    git -C "$fixture_seed" -c core.hooksPath=/dev/null \
+        -c user.name=tmux-runner-test \
+        -c user.email=tmux-runner-test@example.invalid \
+        commit -qm "Create version fixture"
+    fixture_hash=$(git -C "$fixture_seed" rev-parse --short HEAD)
+    cp -a "$fixture_seed" "$clean_repository"
+    cp -a "$fixture_seed" "$modified_repository"
+    cp -a "$fixture_seed" "$locked_repository"
+    printf '\n%s\n' '# Fixture modification.' >> "$modified_runner"
+    chmod a-w "$locked_repository/.git" "$locked_repository/.git/index"
+
+    fixture_output=$(cd -- "$WORKSPACE/t9/unrelated" && "$clean_runner" -V)
+    assert_equal "tmux-runner version 0.1.0 (${fixture_hash} (live))" \
+        "${fixture_output%%$'\n'*}" \
+        "relocated clean fixture did not report a bare live Git hash"
+
+    cp "$clean_runner" "$clean_installed"
+    bash "$VERSION_INJECTOR" "$clean_installed" "$clean_repository"
+    fixture_output=$(env PATH=/nonexistent /bin/bash \
+        "$clean_installed" --version)
+    assert_equal "tmux-runner version 0.1.0 (${fixture_hash})" \
+        "${fixture_output%%$'\n'*}" \
+        "relocated clean installation did not retain its Git hash"
+
+    fixture_output=$(cd -- "$WORKSPACE/t9/unrelated" && "$modified_runner" -V)
+    assert_equal \
+        "tmux-runner version 0.1.0 (${fixture_hash}-dirty (live))" \
+        "${fixture_output%%$'\n'*}" \
+        "relocated modified fixture did not report a dirty live Git hash"
+
+    cp "$modified_runner" "$dirty_installed"
+    bash "$VERSION_INJECTOR" "$dirty_installed" "$modified_repository"
+    fixture_output=$(env PATH=/nonexistent /bin/bash \
+        "$dirty_installed" --version)
+    assert_equal "tmux-runner version 0.1.0 (${fixture_hash}-dirty)" \
+        "${fixture_output%%$'\n'*}" \
+        "relocated modified installation did not retain its dirty Git hash"
+
+    fixture_output=$(cd -- "$WORKSPACE/t9/unrelated" && "$locked_runner" -V)
+    assert_equal "tmux-runner version 0.1.0 (${fixture_hash} (live))" \
+        "${fixture_output%%$'\n'*}" \
+        "read-only relocated index produced a dirty live Git hash"
+
+    cp "$locked_runner" "$locked_installed"
+    bash "$VERSION_INJECTOR" "$locked_installed" "$locked_repository"
+    fixture_output=$(env PATH=/nonexistent /bin/bash \
+        "$locked_installed" --version)
+    assert_equal "tmux-runner version 0.1.0 (${fixture_hash})" \
+        "${fixture_output%%$'\n'*}" \
+        "read-only relocated index produced a dirty installed Git hash"
+
+    no_git_output=$(env PATH=/nonexistent /bin/bash "$RUNNER" --version)
+    assert_equal "tmux-runner version 0.1.0 (unknown)" \
+        "${no_git_output%%$'\n'*}" \
+        "dependency-free version output is wrong"
+    assert_equal "unreleased" \
+        "$(printf '%s\n' "$no_git_output" | sed -n 's/^commit date:  //p')" \
+        "dependency-free version commit date is wrong"
+    assert_equal "unreleased" \
+        "$(printf '%s\n' "$no_git_output" | sed -n 's/^install date: //p')" \
+        "dependency-free install date is wrong"
+
+    sed '/^readonly RUNNER_GIT_HASH=/d' "$RUNNER" > "$missing_anchor"
+    rc=0
+    bash "$VERSION_INJECTOR" "$missing_anchor" "$clean_repository" \
+        > "$stdout_file" 2> "$stderr_file" || rc=$?
+    assert_equal "2" "$rc" \
+        "injector accepted a missing metadata declaration"
+    assert_contains "$stderr_file" \
+        "expected exactly one readonly RUNNER_GIT_HASH declaration" \
+        "missing metadata declaration error is unclear"
+
+    cp "$RUNNER" "$duplicate_anchor"
+    printf '%s\n' 'readonly RUNNER_GIT_HASH="duplicate"' >> "$duplicate_anchor"
+    rc=0
+    bash "$VERSION_INJECTOR" "$duplicate_anchor" "$clean_repository" \
+        > "$stdout_file" 2> "$stderr_file" || rc=$?
+    assert_equal "2" "$rc" \
+        "injector accepted duplicate metadata declarations"
+    assert_contains "$stderr_file" \
+        "expected exactly one readonly RUNNER_GIT_HASH declaration" \
+        "duplicate metadata declaration error is unclear"
+
+    rc=0
+    env PATH=/nonexistent /bin/bash "$RUNNER" --version extra \
+        > "$stdout_file" 2> "$stderr_file" || rc=$?
+    assert_equal "2" "$rc" \
+        "version with an extra argument returned the wrong status"
+    assert_contains "$stderr_file" "version does not accept arguments" \
+        "version with an extra argument omitted its error"
+    assert_not_contains "$stderr_file" "tmux is not available" \
+        "version validated tmux before its own arguments"
+    pass_test T9 "source and installed version metadata"
+}
+
 function main {
     require_dependencies
     WORKSPACE=$(mktemp -d /tmp/tmux-runner-test.XXXXXX)
@@ -1572,6 +1788,7 @@ function main {
     test_t6_install
     test_t7_documentation
     test_t8_help
+    test_t9_version
     printf 'PASS: %d milestone checks completed\n' "$TESTS_PASSED"
 }
 

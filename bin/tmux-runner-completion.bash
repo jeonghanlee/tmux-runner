@@ -21,7 +21,7 @@ function _tmux_runner {
 
     if (( COMP_CWORD == 1 )); then
         mapfile -t COMPREPLY < <(
-            compgen -W 'create c ls attach a -h --help' -- "$current"
+            compgen -W 'create c ls attach a -V --version -h --help' -- "$current"
         )
         return
     fi

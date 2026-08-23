@@ -3,6 +3,10 @@
 set -euo pipefail
 
 readonly PROGRAM_NAME="${0##*/}"
+readonly RUNNER_VERSION="0.1.0"
+readonly RUNNER_GIT_HASH="unknown"
+readonly RUNNER_COMMIT_DATE="unreleased"
+readonly RUNNER_INSTALL_DATE="unreleased"
 TMUX_BIN=$(type -P tmux || true)
 readonly TMUX_BIN
 HOSTNAME_BIN=$(type -P hostname || true)
@@ -24,7 +28,63 @@ function print_usage {
     printf '  ls         List sessions, select one by number, and enter it.\n'
     printf '  attach, a  Enter an existing session by name.\n'
     printf '\nOptions:\n'
-    printf '  -h, --help  Show this help and exit.\n'
+    printf '  -V, --version  Show version and Git metadata.\n'
+    printf '  -h, --help     Show this help and exit.\n'
+}
+
+function print_version {
+    local display_hash="$RUNNER_GIT_HASH"
+    local display_commit_date="$RUNNER_COMMIT_DATE"
+    local display_install_date="$RUNNER_INSTALL_DATE"
+    local script_source="${BASH_SOURCE[0]}"
+    local script_directory=""
+    local git_bin=""
+    local date_bin=""
+    local commit_timestamp=""
+
+    if [[ "$display_hash" == "unknown" ]]; then
+        git_bin=$(type -P git || true)
+        date_bin=$(type -P date || true)
+        if [[ "$script_source" == */* ]]; then
+            script_directory="${script_source%/*}"
+        else
+            script_directory="."
+        fi
+        if script_directory=$(cd -- "$script_directory" 2>/dev/null && pwd -P) && \
+            [[ -n "$git_bin" ]] && [[ -x "$git_bin" ]] && \
+            "$git_bin" -C "$script_directory" rev-parse \
+                --is-inside-work-tree >/dev/null 2>&1; then
+            display_hash=$(
+                "$git_bin" -C "$script_directory" rev-parse --short HEAD
+            )
+            if ! "$git_bin" -C "$script_directory" diff --quiet HEAD -- \
+                2>/dev/null; then
+                display_hash="${display_hash}-dirty"
+            fi
+            display_hash="${display_hash} (live)"
+            commit_timestamp=$(
+                "$git_bin" -C "$script_directory" show -s --format=%ct HEAD \
+                    2>/dev/null || true
+            )
+            if [[ -n "$commit_timestamp" ]] && [[ -n "$date_bin" ]] && \
+                [[ -x "$date_bin" ]]; then
+                if ! display_commit_date=$(
+                    "$date_bin" -u -d "@${commit_timestamp}" \
+                        '+%Y-%m-%dT%H:%M:%SZ'
+                ); then
+                    display_commit_date="unknown"
+                fi
+            else
+                display_commit_date="unknown"
+            fi
+            display_install_date="live"
+        fi
+    fi
+
+    printf '%s version %s (%s)\n' \
+        "$PROGRAM_NAME" "$RUNNER_VERSION" "$display_hash"
+    printf 'commit date:  %s\n' "$display_commit_date"
+    printf 'install date: %s\n' "$display_install_date"
 }
 
 function print_create_usage {
@@ -335,6 +395,15 @@ function main {
     shift
 
     case "$command_name" in
+        -V|--version)
+            if (( $# > 0 )); then
+                fail "version does not accept arguments"
+                print_usage >&2
+                return 2
+            fi
+            print_version
+            return 0
+            ;;
         -h|--help)
             if (( $# > 0 )); then
                 fail "help does not accept arguments"

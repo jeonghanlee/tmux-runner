@@ -19,8 +19,9 @@ client's server.
 ## Requirements
 
 Running `tmux-runner` requires Bash 4 or later, tmux, and `hostname`.
-Installation additionally requires GNU Make and `install`. Confirm that the
-commands are available, then verify the Bash and Make versions before
+Installation additionally requires GNU Make, `install`, Git, `date`, and
+`sed` to copy the runner and stamp its Git and installation metadata. Confirm
+that the commands are available, then verify the Bash and Make versions before
 installation:
 
 ```bash
@@ -29,6 +30,9 @@ command -v tmux
 command -v hostname
 command -v make
 command -v install
+command -v git
+command -v date
+command -v sed
 bash --version
 make --version
 ```
@@ -81,14 +85,37 @@ Show the complete command summary or help for one command:
 
 ```bash
 tmux-runner --help
+tmux-runner --version
 tmux-runner create --help
 tmux-runner ls --help
 tmux-runner attach --help
 ```
 
 `-h` is equivalent to `--help`. The `c` and `a` aliases provide the same help
-as their long command names. Help remains available when tmux is not in
-`PATH`.
+as their long command names. `-V` is equivalent to `--version`. Help and
+version output remain available when tmux is not in `PATH`.
+
+## Version Tracking
+
+The runner reports version `0.1.0`, Git commit identity, commit date, and
+installation date:
+
+```bash
+tmux-runner --version
+```
+
+When executed directly from the repository, the Git identity is resolved from
+the live working tree. A tracked modification adds the `-dirty` suffix:
+
+```text
+tmux-runner version 0.1.0 (<hash> (live))
+commit date:  <commit-date>
+install date: live
+```
+
+`make install` stamps the installed copy with the source Git identity, commit
+date, and installation date. The installed command therefore retains its
+deployment identity when it is executed outside the repository.
 
 ## Bash Completion
 
