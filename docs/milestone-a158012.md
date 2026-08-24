@@ -17,8 +17,8 @@ Canonical branch or ref: master
 Git upstream: origin/master
 Remote tracker: none
 
-Next session entry point: commit the reviewed M7 release candidate, then run
-M7 / T5 against its clean committed tree and fresh installation.
+Next session entry point: review the completed M3-M7 commits and M7 evidence;
+any tag, push, or GitHub release remains a separately authorized operation.
 
 ## Milestone
 
@@ -32,9 +32,9 @@ M7 / T5 against its clean committed tree and fresh installation.
 | Identity | M4 | Resolve repository and working-directory identity | Milestone | Complete | No | M3, D16 | Complete 2026-08-24, carrying commit `8caaea1`; M4 / T1-T5 and both requested reviews accepted; [detail](#m4---resolve-repository-and-working-directory-identity) |
 | Discovery | M5 | Discover configured repositories and select one | Milestone | Complete | No | M4, D15, D17 | Complete 2026-08-24, carrying commit `71ce91f`; M5 / T1-T5 and both requested reviews accepted; [detail](#m5---discover-configured-repositories-and-select-one) |
 | Navigation | M6 | Add recent and previous-session navigation | Milestone | Complete | No | M5, D18 | Complete 2026-08-24, carrying commit `1a46fca`; M6 / T1-T5 and both requested reviews accepted; [detail](#m6---add-recent-and-previous-session-navigation) |
-| Integration | M7 | Complete integrated verification and release preparation | Milestone | In progress | No | M3, M4, M5, M6, D17 | M7 / T1-T4 and the stage review cycle passed; the carrying commit and clean-candidate M7 / T5 remain; [detail](#m7---complete-integrated-verification-and-release-preparation) |
+| Integration | M7 | Complete integrated verification and release preparation | Milestone | Complete | No | M3, M4, M5, M6, D17 | Complete 2026-08-24, carrying commit `ae23625`; M7 / T1-T5 and the complete stage review cycle accepted; [detail](#m7---complete-integrated-verification-and-release-preparation) |
 
-Milestone tally: Complete 6, In progress 1, Not started 0.
+Milestone tally: Complete 7, In progress 0, Not started 0.
 
 ### Decisions
 
@@ -782,7 +782,7 @@ Superseded Plan Artifacts: none
 Origin: a158012 / M7
 Identity History: none
 GitHub Issue: none
-Status: In progress
+Status: Complete
 
 ##### Summary
 
@@ -875,7 +875,7 @@ Superseded Plan Artifacts: none
 | T2 | 2026-08-24 | Source and installed runners and completion, fresh temporary homes, real dedicated tmux servers, and the shipped README | Pass | Every command and alias help form, version alias, command, option, session, and directory completion set matched the CLI; documented dependency, isolation, detach, and `attach --` behavior executed as stated. |
 | T3 | 2026-08-24 | Source tree and fresh installed copy, real dedicated and default tmux servers, Git repositories and linked worktrees, PTYs, FIFOs, XDG paths, and controlled concurrency | Pass | Both complete passes reported 30 milestone checks; every M1-M7 contract ran through the shipped runner, completion, installation, and real external boundaries. |
 | T4 | 2026-08-24 | Outer process supervisor, real tmux queries, Linux process and filesystem inspection, and controlled successful and forced-failure children | Pass | Before, during, and after observation confirmed separate sockets and sessions, live servers, panes and client, valid mode-protected state, a held then released directory lock, terminated processes, removed success resources, and a reported failure workspace containing valid state without socket or transaction debris. |
-| T5 | Pending | Clean committed candidate and fresh local installation | Pending | Run only after the reviewed implementation commit establishes the candidate hash and clean repository state. |
+| T5 | 2026-08-24 | Clean commit `ae23625`, fresh spaced `HOME` and XDG installation, GNU Make, and local Git worktree, index, and tag inspection | Pass | Before and after installation the worktree and index were clean; the exact three installed files and modes matched; source and installed content, version `0.1.0`, commit identity, and dates agreed; T1-T4 and all stage reviews were present in the candidate; and local tags remained unchanged. |
 
 ##### Closure Evidence
 
@@ -896,7 +896,10 @@ Superseded Plan Artifacts: none
   configuration, command, detach, isolation, navigation, help, completion,
   verification, and resume paths; it reported no finding and accepted the
   reader-facing result.
-- The carrying commit and M7 / T5 clean-candidate evidence remain pending.
+- Carrying commit `ae23625` contains the reviewed implementation and M7 / T1-
+  T4 evidence. M7 / T5 passed against that clean commit and a fresh local
+  installation; no tag, push, GitHub release, or remote milestone mutation
+  was authorized or executed.
 
 ## Backlog
 
