@@ -7,8 +7,9 @@ sessions. It creates, lists, and enters sessions on a dedicated tmux server.
 
 Every tmux operation uses `tmux -L tmux-runner`. The resulting Unix domain
 socket is `${TMUX_TMPDIR:-/tmp}/tmux-<uid>/tmux-runner`; the runner does not
-inspect or enumerate socket files. Default-server sessions are separate and
-are not listed, completed, moved, or changed by the runner.
+inspect or enumerate socket files. Existing default-server sessions are not
+migrated and are not visible to runner `ls`, `attach`, or Bash completion.
+The runner does not move or change them.
 `TMUX_TMPDIR` selects the socket root when it is set.
 
 On the first command that starts the dedicated server, tmux reads
@@ -46,13 +47,13 @@ and an attach acknowledgment queued by tmux after outside-client handoff.
 ## Requirements
 
 Session commands require Bash 4 or later, tmux, `flock`, `mktemp`, `mkdir`,
-`chmod`, `mv`, `ln`, `rm`, and `sleep`. `create` also requires Git
-to distinguish working trees from ordinary directories. An automatic
-`create` requires `hostname`; `sha256sum` is required when parent components
-cannot produce an available distinct name, including normalized path
-collisions. `ls` and `attach` do not use Git or `hostname`.
-`repo`, and automatic `create` when a usable repository catalog is configured,
-also require `find` and `sort`.
+`chmod`, `mv`, `ln`, `rm`, and `sleep`. `create`, `repo`, and `recent` require
+Git to validate working-tree identity. Their automatic session names also
+require `hostname`; `sha256sum` is required when parent components cannot
+produce an available distinct name, including normalized path collisions.
+`repo`, catalog-aware automatic `create`, and catalog-aware `recent` also
+require `find` and `sort`. `ls` and `attach` do not use Git, `hostname`,
+`sha256sum`, `find`, or `sort`.
 
 Installation additionally requires GNU Make, `install`, `date`, and `sed` to
 copy the runner and stamp its Git and installation metadata. Confirm that the
@@ -345,10 +346,12 @@ tmux-runner create
 
 The resulting session starts at the Git top level and normally uses
 `<repo>-<short-hostname>`. Running the same command from another subdirectory
-enters the existing path-matched session. To return to the original shell
-first, press `Ctrl-b`, release the keys, and then press `d` to detach from tmux.
-Use the same detach sequence before running a `tmux-runner` session command
-from a client connected to the default or any other tmux server.
+enters the existing path-matched session. With the shipped starter config, to
+return to the original shell first, press `Ctrl-b`, release the keys, and then
+press `d` to detach from tmux. If the runner config changes that binding, use
+the configured detach binding instead. From a client connected to the default
+or any other tmux server, use that server's configured detach binding before
+running a `tmux-runner` session command from the outer shell.
 
 After entering another runner session, use `tmux-runner last` to return to the
 previous one. Use `tmux-runner recent` when the destination path remains but
@@ -362,4 +365,9 @@ Run the shipped integration suite from the repository root:
 tests/test-tmux-runner.bash
 ```
 
-The suite uses isolated real tmux servers and terminal clients.
+An outer supervisor runs the complete suite once from the source tree and once
+from a fresh installation under spaced `HOME` and XDG paths. Both passes use
+isolated real tmux servers, terminal clients, Git repositories, worktrees, and
+local state. The supervisor also observes dedicated and default sockets,
+servers, panes, clients, processes, state files, and locks while they are live,
+then verifies their cleanup after successful and forced-failure runs.

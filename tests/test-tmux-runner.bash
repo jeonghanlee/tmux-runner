@@ -13,14 +13,21 @@ readonly TEST_DIR
 unset TEST_SOURCE TEST_SOURCE_DIR
 REPO_ROOT=$(cd -- "$TEST_DIR/.." && pwd -P)
 readonly REPO_ROOT
-readonly RUNNER="$REPO_ROOT/bin/tmux-runner"
-readonly COMPLETION="$REPO_ROOT/bin/tmux-runner-completion.bash"
+readonly SOURCE_RUNNER="$REPO_ROOT/bin/tmux-runner"
+readonly SOURCE_COMPLETION="$REPO_ROOT/bin/tmux-runner-completion.bash"
+RUNNER=${TMUX_RUNNER_TEST_RUNNER:-$SOURCE_RUNNER}
+readonly RUNNER
+COMPLETION=${TMUX_RUNNER_TEST_COMPLETION:-$SOURCE_COMPLETION}
+readonly COMPLETION
+TEST_VARIANT=${TMUX_RUNNER_TEST_VARIANT:-source}
+readonly TEST_VARIANT
 readonly VERSION_INJECTOR="$REPO_ROOT/configure/inject-runner-version.bash"
 readonly README="$REPO_ROOT/README.md"
 readonly RUNNER_CONFIG="$REPO_ROOT/config/tmux.conf"
 readonly RUNNER_SERVER_NAME="tmux-runner"
 readonly PTY_TIMEOUT_SECONDS=12
 readonly POLL_INTERVAL_SECONDS=0.05
+readonly SUPERVISOR_TIMEOUT_SECONDS=30
 
 TMUX_PATH=""
 TMUX_RUNNER_TRACE_PREFIX=""
@@ -172,6 +179,9 @@ function cleanup {
         rm -rf -- "$WORKSPACE"
     elif [[ -n "$WORKSPACE" ]] && [[ -d "$WORKSPACE" ]]; then
         printf 'Diagnostic workspace: %s\n' "$WORKSPACE" >&2
+    fi
+    if [[ -n "${TMUX_RUNNER_TEST_CLEANUP_DONE:-}" ]]; then
+        printf 'done\n' > "$TMUX_RUNNER_TEST_CLEANUP_DONE"
     fi
 }
 
@@ -2651,9 +2661,14 @@ function test_t1_static {
     assert_command_succeeds "version injector Bash syntax failed" \
         bash -n "$VERSION_INJECTOR"
     assert_command_succeeds "test Bash syntax failed" bash -n "$TEST_DIR/test-tmux-runner.bash"
-    assert_command_succeeds "ShellCheck reported a finding" \
-        shellcheck "$RUNNER" "$COMPLETION" "$VERSION_INJECTOR" \
-        "$TEST_DIR/test-tmux-runner.bash"
+    assert_command_succeeds "runner ShellCheck reported a finding" \
+        shellcheck "$RUNNER"
+    assert_command_succeeds "completion ShellCheck reported a finding" \
+        shellcheck -s bash "$COMPLETION"
+    assert_command_succeeds "version injector ShellCheck reported a finding" \
+        shellcheck "$VERSION_INJECTOR"
+    assert_command_succeeds "test ShellCheck reported a finding" \
+        shellcheck "$TEST_DIR/test-tmux-runner.bash"
     pass_test T1 "Bash syntax and ShellCheck"
 }
 
@@ -3100,11 +3115,11 @@ function test_t5_completion {
     COMP_WORDS=(tmux-runner attach -)
     COMP_CWORD=2
     _tmux_runner
-    assert_reply_set "attach option completion set is wrong" -t -h --help
+    assert_reply_set "attach option completion set is wrong" -t -- -h --help
     COMP_WORDS=(tmux-runner a -)
     COMP_CWORD=2
     _tmux_runner
-    assert_reply_set "a option completion set is wrong" -t -h --help
+    assert_reply_set "a option completion set is wrong" -t -- -h --help
 
     pushd "$completion_dir" >/dev/null
     COMP_WORDS=(tmux-runner create -c work-)
@@ -3214,7 +3229,7 @@ function test_t6_install {
     sed -e 's/^readonly RUNNER_GIT_HASH=.*/readonly RUNNER_GIT_HASH="normalized"/' \
         -e 's/^readonly RUNNER_COMMIT_DATE=.*/readonly RUNNER_COMMIT_DATE="normalized"/' \
         -e 's/^readonly RUNNER_INSTALL_DATE=.*/readonly RUNNER_INSTALL_DATE="normalized"/' \
-        "$RUNNER" > "$source_normalized"
+        "$SOURCE_RUNNER" > "$source_normalized"
     sed -e 's/^readonly RUNNER_GIT_HASH=.*/readonly RUNNER_GIT_HASH="normalized"/' \
         -e 's/^readonly RUNNER_COMMIT_DATE=.*/readonly RUNNER_COMMIT_DATE="normalized"/' \
         -e 's/^readonly RUNNER_INSTALL_DATE=.*/readonly RUNNER_INSTALL_DATE="normalized"/' \
@@ -3224,7 +3239,7 @@ function test_t6_install {
         cmp -s "$source_normalized" "$installed_normalized"
     assert_command_succeeds \
         "installed completion differs from shipped completion" \
-        cmp -s "$COMPLETION" "$installed_completion"
+        cmp -s "$SOURCE_COMPLETION" "$installed_completion"
     assert_command_succeeds \
         "installed config differs from shipped config" \
         cmp -s "$RUNNER_CONFIG" "$installed_config"
@@ -3452,6 +3467,7 @@ function test_t9_version {
     local short_output=""
     local long_output=""
     local no_git_output=""
+    local active_install_date=""
     local fixture_seed="$WORKSPACE/t9/seed"
     local seed_runner="$WORKSPACE/t9/seed/bin/tmux-runner"
     local clean_repository="$WORKSPACE/t9/relocated-clean"
@@ -3488,20 +3504,32 @@ function test_t9_version {
     long_output=$(cd -- "$WORKSPACE/t9/unrelated" && "$RUNNER" --version)
     assert_equal "$short_output" "$long_output" \
         "short and long version forms differ"
-    assert_equal "tmux-runner version 0.1.0 (${expected_hash} (live))" \
-        "${long_output%%$'\n'*}" \
-        "source runner reported the wrong live version or Git hash"
+    if [[ "$TEST_VARIANT" == "source" ]]; then
+        assert_equal "tmux-runner version 0.1.0 (${expected_hash} (live))" \
+            "${long_output%%$'\n'*}" \
+            "source runner reported the wrong live version or Git hash"
+    else
+        assert_equal "tmux-runner version 0.1.0 (${expected_hash})" \
+            "${long_output%%$'\n'*}" \
+            "installed runner reported the wrong injected Git hash"
+    fi
     assert_equal "$expected_commit_date" \
         "$(printf '%s\n' "$long_output" | sed -n 's/^commit date:  //p')" \
         "source runner reported the wrong live commit date"
-    assert_equal "live" \
-        "$(printf '%s\n' "$long_output" | sed -n 's/^install date: //p')" \
-        "source runner did not identify its live install state"
+    active_install_date=$(
+        printf '%s\n' "$long_output" | sed -n 's/^install date: //p'
+    )
+    if [[ "$TEST_VARIANT" == "source" ]]; then
+        assert_equal "live" "$active_install_date" \
+            "source runner did not identify its live install state"
+    elif ! date -u -d "$active_install_date" '+%s' >/dev/null 2>&1; then
+        fail_test "installed runner reported an invalid install date"
+    fi
 
     # Commit once, then copy without running Git in the copies. The relocated
     # files have new inodes while the copied index retains its cached stat
     # data, which distinguishes a content diff from an index-only verdict.
-    cp "$RUNNER" "$seed_runner"
+    cp "$SOURCE_RUNNER" "$seed_runner"
     git -C "$fixture_seed" init -q
     git -C "$fixture_seed" add bin/tmux-runner
     git -C "$fixture_seed" -c core.hooksPath=/dev/null \
@@ -3555,7 +3583,9 @@ function test_t9_version {
         "${fixture_output%%$'\n'*}" \
         "read-only relocated index produced a dirty installed Git hash"
 
-    no_git_output=$(env PATH=/nonexistent /bin/bash "$RUNNER" --version)
+    no_git_output=$(
+        env PATH=/nonexistent /bin/bash "$SOURCE_RUNNER" --version
+    )
     assert_equal "tmux-runner version 0.1.0 (unknown)" \
         "${no_git_output%%$'\n'*}" \
         "dependency-free version output is wrong"
@@ -3566,7 +3596,8 @@ function test_t9_version {
         "$(printf '%s\n' "$no_git_output" | sed -n 's/^install date: //p')" \
         "dependency-free install date is wrong"
 
-    sed '/^readonly RUNNER_GIT_HASH=/d' "$RUNNER" > "$missing_anchor"
+    sed '/^readonly RUNNER_GIT_HASH=/d' \
+        "$SOURCE_RUNNER" > "$missing_anchor"
     rc=0
     bash "$VERSION_INJECTOR" "$missing_anchor" "$clean_repository" \
         > "$stdout_file" 2> "$stderr_file" || rc=$?
@@ -3576,7 +3607,7 @@ function test_t9_version {
         "expected exactly one readonly RUNNER_GIT_HASH declaration" \
         "missing metadata declaration error is unclear"
 
-    cp "$RUNNER" "$duplicate_anchor"
+    cp "$SOURCE_RUNNER" "$duplicate_anchor"
     printf '%s\n' 'readonly RUNNER_GIT_HASH="duplicate"' >> "$duplicate_anchor"
     rc=0
     bash "$VERSION_INJECTOR" "$duplicate_anchor" "$clean_repository" \
@@ -3596,7 +3627,7 @@ function test_t9_version {
         "version with an extra argument omitted its error"
     assert_not_contains "$stderr_file" "tmux is not available" \
         "version validated tmux before its own arguments"
-    pass_test T9 "source and installed version metadata"
+    pass_test T9 "$TEST_VARIANT and fixture version metadata"
 }
 
 function test_m3_t1_static_server_path {
@@ -5225,6 +5256,167 @@ function test_m6_t5_interface_regression {
         "installed navigation, interface, documentation, and cleanup regression"
 }
 
+function test_m7_t1_installation {
+    local root=""
+    local home="$WORKSPACE/m7-t1/home with space"
+    local xdg_home="$WORKSPACE/m7-t1/config home with space"
+    local installed_runner="$home/.local/bin/tmux-runner"
+    local installed_completion="$home/.local/share/bash-completion/completions/tmux-runner"
+    local installed_config="$xdg_home/tmux-runner/tmux.conf"
+    local preserved_config="$WORKSPACE/m7-t1/preserved-tmux.conf"
+    local session_path="$WORKSPACE/m7-t1/session path"
+    local state_directory="$home/.local/state/tmux-runner"
+    local inventory=""
+    local expected_inventory=""
+    local socket_file=""
+
+    unset XDG_STATE_HOME || true
+    create_tmux_root m7-t1
+    root="$NEW_TMUX_ROOT"
+    mkdir -p -- "$home" "$xdg_home" "$session_path"
+    assert_command_succeeds "M7-T1 make install failed" \
+        env XDG_CONFIG_HOME="$xdg_home" \
+        make -C "$REPO_ROOT" HOME="$home" install
+
+    inventory=$(find "$home" "$xdg_home" \( -type f -o -type l \) \
+        -print | LC_ALL=C sort)
+    expected_inventory=$(printf '%s\n%s\n%s\n' \
+        "$installed_runner" "$installed_completion" "$installed_config" | \
+        LC_ALL=C sort)
+    assert_equal "$expected_inventory" "$inventory" \
+        "M7-T1 install inventory is wrong"
+    assert_equal "0755" "0$(stat -c '%a' "$installed_runner")" \
+        "M7-T1 installed runner mode is wrong"
+    assert_equal "0644" "0$(stat -c '%a' "$installed_completion")" \
+        "M7-T1 installed completion mode is wrong"
+    assert_equal "0644" "0$(stat -c '%a' "$installed_config")" \
+        "M7-T1 installed config mode is wrong"
+    assert_command_succeeds "M7-T1 initial config differs from source" \
+        cmp -s "$RUNNER_CONFIG" "$installed_config"
+
+    printf '%s\n' 'set -g @tmux-runner-m7-config loaded' > "$installed_config"
+    cp "$installed_config" "$preserved_config"
+    assert_command_succeeds "M7-T1 second make install failed" \
+        env XDG_CONFIG_HOME="$xdg_home" \
+        make -C "$REPO_ROOT" HOME="$home" install
+    assert_command_succeeds "M7-T1 second install changed local config" \
+        cmp -s "$preserved_config" "$installed_config"
+
+    socket_file=$(find "$root" -type s -print -quit)
+    assert_equal "" "$socket_file" \
+        "M7-T1 did not begin with a cold tmux root"
+    run_outside_success m7-t1-cold-create "$root" "$home" "$xdg_home" \
+        "$installed_runner" m7-install-session create \
+        -s m7-install-session -c "$session_path"
+    assert_equal "loaded" \
+        "$(run_tmux "$root" show-options -gv @tmux-runner-m7-config)" \
+        "M7-T1 cold server did not load the preserved local config"
+    assert_equal "$session_path" \
+        "$(pane_directory "$root" m7-install-session)" \
+        "M7-T1 installed runner started in the wrong directory"
+    assert_state_modes "$state_directory"
+    assert_no_state_transactions "$state_directory"
+    pass_test M7-T1 \
+        "spaced installation, preservation, and cold config startup"
+}
+
+function test_m7_t2_interface_bundle {
+    local root=""
+    local home="$WORKSPACE/m7-t2/home"
+    local xdg_home="$WORKSPACE/m7-t2/config"
+    local stdout_file=""
+    local stderr_file=""
+    local short_version=""
+    local long_version=""
+    local command_name=""
+    local -a command_names=(create c repo recent last ls attach a)
+
+    create_tmux_root m7-t2
+    root="$NEW_TMUX_ROOT"
+    mkdir -p -- "$home" "$xdg_home" "$WORKSPACE/m7-t2/help"
+    run_tmux "$root" -f /dev/null new-session -d -s m7-interface
+
+    for command_name in "${command_names[@]}"; do
+        stdout_file="$WORKSPACE/m7-t2/help/$command_name.stdout"
+        stderr_file="$WORKSPACE/m7-t2/help/$command_name.stderr"
+        assert_command_succeeds "$command_name --help failed" \
+            env PATH=/nonexistent /bin/bash "$RUNNER" \
+            "$command_name" --help > "$stdout_file" 2> "$stderr_file"
+        assert_contains "$stdout_file" "Usage: tmux-runner $command_name" \
+            "$command_name help omitted its usage"
+        if [[ -s "$stderr_file" ]]; then
+            fail_test "$command_name help wrote to stderr"
+        fi
+    done
+    assert_command_succeeds "top-level help failed" \
+        env PATH=/nonexistent /bin/bash "$RUNNER" --help \
+        > "$WORKSPACE/m7-t2/help/top.stdout" \
+        2> "$WORKSPACE/m7-t2/help/top.stderr"
+    assert_contains "$WORKSPACE/m7-t2/help/top.stdout" \
+        "Default-server sessions are not migrated or visible" \
+        "top-level help omits default-server isolation"
+    short_version=$(env PATH=/nonexistent /bin/bash "$RUNNER" -V)
+    long_version=$(env PATH=/nonexistent /bin/bash "$RUNNER" --version)
+    assert_equal "$short_version" "$long_version" \
+        "M7-T2 version aliases differ"
+
+    unset TMUX || true
+    export TMUX_TMPDIR="$root"
+    # The active completion copy must describe the active runner copy.
+    # shellcheck disable=SC1090,SC1091
+    source "$COMPLETION"
+    COMP_WORDS=(tmux-runner "")
+    COMP_CWORD=1
+    _tmux_runner
+    assert_reply_set "M7-T2 command completion set is wrong" \
+        create c repo recent last ls attach a -V --version -h --help
+    COMP_WORDS=(tmux-runner attach -)
+    COMP_CWORD=2
+    _tmux_runner
+    assert_reply_set "M7-T2 attach option completion set is wrong" \
+        -t -- -h --help
+    COMP_WORDS=(tmux-runner a -)
+    COMP_CWORD=2
+    _tmux_runner
+    assert_reply_set "M7-T2 a option completion set is wrong" \
+        -t -- -h --help
+    COMP_WORDS=(tmux-runner attach -- m7)
+    COMP_CWORD=3
+    _tmux_runner
+    assert_reply_set "M7-T2 terminator completion set is wrong" m7-interface
+
+    assert_contains "$README" "Existing default-server sessions are not" \
+        "README omits default-server isolation"
+    assert_contains "$README" "detach and rerun" \
+        "README omits the cross-server detach instruction"
+    assert_contains "$README" "tmux-runner attach --" \
+        "README omits valid attach terminator syntax"
+    assert_contains "$README" "tmux-runner/tmux.conf" \
+        "README omits the local config path"
+    assert_contains "$README" ".local/state}/tmux-runner" \
+        "README omits the local state path"
+    assert_contains "$README" "source ~/.local/share/bash-completion" \
+        "README omits completion activation"
+    assert_contains "$README" \
+        $'`create`, `repo`, and `recent` require\nGit to validate working-tree identity.' \
+        "README omits the Git requirement scope"
+    assert_contains "$README" \
+        $'Their automatic session names also\nrequire `hostname`;' \
+        "README omits the hostname requirement scope"
+    assert_contains "$README" \
+        $'`repo`, catalog-aware automatic `create`, and catalog-aware `recent` also\nrequire `find` and `sort`.' \
+        "README omits the find and sort requirement scope"
+    assert_contains "$README" "that server's configured detach binding" \
+        "README omits the configured cross-server detach binding"
+
+    run_outside_success m7-t2-attach-terminator "$root" "$home" \
+        "$xdg_home" "$RUNNER" m7-interface attach -- m7-interface
+    assert_contains "$LAST_TRANSCRIPT" \
+        "$TMUX_RUNNER_TRACE_PREFIX attach-session -t =m7-interface" \
+        "M7-T2 valid attach -- did not use the exact session target"
+    pass_test M7-T2 "$TEST_VARIANT help, completion, README, and attach --"
+}
+
 function assert_manifest_processes_stopped {
     local manifest="$1"
     local process_id=""
@@ -5243,25 +5435,353 @@ function manifest_workspace {
     awk -F '\t' '$1 == "workspace" { print $2; exit }' "$manifest"
 }
 
-function remove_supervisor_control_files {
-    local success_manifest="$1"
-    local failure_manifest="$2"
-    local failure_output="$3"
+function manifest_value {
+    local manifest="$1"
+    local record_type="$2"
 
-    rm -f -- "$success_manifest" "$failure_manifest" "$failure_output"
+    awk -F '\t' -v record_type="$record_type" \
+        '$1 == record_type { print $2; exit }' "$manifest"
+}
+
+function wait_for_supervisor_file {
+    local path="$1"
+    local deadline=$((SECONDS + SUPERVISOR_TIMEOUT_SECONDS))
+
+    while (( SECONDS <= deadline )); do
+        if [[ -e "$path" ]]; then
+            return 0
+        fi
+        sleep "$POLL_INTERVAL_SECONDS"
+    done
+    return 1
+}
+
+function state_transaction_debris {
+    local state_directory="$1"
+
+    find "$state_directory" -maxdepth 1 -type f \
+        \( -name 'pending.*' -o -name 'ack.*' \
+        -o -name '.pending.*' -o -name '.ack.*' \
+        -o -name '.state.tmp.*' \) -print
+}
+
+function directory_lock_available {
+    local state_directory="$1"
+    local lock_fd=""
+    local lock_rc=0
+
+    exec {lock_fd}<"$state_directory"
+    flock -n -x "$lock_fd" || lock_rc=$?
+    if (( lock_rc == 0 )); then
+        flock -u "$lock_fd"
+    fi
+    exec {lock_fd}>&-
+    return "$lock_rc"
+}
+
+function remove_supervisor_control_files {
+    local supervisor_workspace="$1"
+
+    if [[ -d "$supervisor_workspace" ]] && \
+        [[ "$supervisor_workspace" == /tmp/tmux-runner-supervisor.* ]]; then
+        chmod -R u+w -- "$supervisor_workspace" 2>/dev/null || true
+        rm -rf -- "$supervisor_workspace"
+    fi
+}
+
+function run_complete_child {
+    local variant="$1"
+    local runner="$2"
+    local completion="$3"
+    local manifest="$4"
+    local script_path="$TEST_DIR/test-tmux-runner.bash"
+    local child_workspace=""
+    local child_rc=0
+
+    : > "$manifest"
+    env TMUX_RUNNER_TEST_CHILD=1 \
+        TMUX_RUNNER_TEST_MANIFEST="$manifest" \
+        TMUX_RUNNER_TEST_VARIANT="$variant" \
+        TMUX_RUNNER_TEST_RUNNER="$runner" \
+        TMUX_RUNNER_TEST_COMPLETION="$completion" \
+        bash "$script_path" || child_rc=$?
+    child_workspace=$(manifest_workspace "$manifest")
+    if (( child_rc != 0 )); then
+        printf '%s test child failed with exit %d.\n' \
+            "$variant" "$child_rc" >&2
+        return "$child_rc"
+    fi
+    if [[ -z "$child_workspace" ]] || [[ -e "$child_workspace" ]]; then
+        printf '%s child left its workspace: %s\n' \
+            "$variant" "$child_workspace" >&2
+        return 1
+    fi
+    if ! assert_manifest_processes_stopped "$manifest"; then
+        return 1
+    fi
+}
+
+function stop_observation_child {
+    local child_pid="$1"
+    local start_release="$2"
+    local finish_release="$3"
+    local cleanup_done="$4"
+
+    : > "$start_release"
+    : > "$finish_release"
+    if kill -0 "$child_pid" 2>/dev/null; then
+        kill -TERM "$child_pid" 2>/dev/null || true
+    fi
+    if ! wait_for_supervisor_file "$cleanup_done" && \
+        kill -0 "$child_pid" 2>/dev/null; then
+        kill -KILL "$child_pid" 2>/dev/null || true
+    fi
+    wait "$child_pid" 2>/dev/null || true
+}
+
+function inspect_observation_before_release {
+    local manifest="$1"
+    local root=""
+    local state_directory=""
+    local runner_socket=""
+    local default_socket=""
+
+    root=$(manifest_value "$manifest" root)
+    state_directory=$(manifest_value "$manifest" state)
+    if [[ -z "$root" ]] || [[ -z "$state_directory" ]]; then
+        printf 'Observation manifest is incomplete before release.\n' >&2
+        return 1
+    fi
+    runner_socket="$root/tmux-$UID/$RUNNER_SERVER_NAME"
+    default_socket="$root/tmux-$UID/default"
+    if [[ -e "$runner_socket" ]] || [[ -e "$default_socket" ]]; then
+        printf 'Observation probe created a socket before release.\n' >&2
+        return 1
+    fi
+    if [[ -e "$state_directory" ]]; then
+        printf 'Observation probe created state before release.\n' >&2
+        return 1
+    fi
+}
+
+function inspect_observation_live {
+    local manifest="$1"
+    local root=""
+    local state_directory=""
+    local state_file=""
+    local runner_socket=""
+    local default_socket=""
+    local runner_session=""
+    local default_session=""
+    local runner_pane_count=""
+    local default_pane_count=""
+    local client_session=""
+    local server_pid=""
+    local default_server_pid=""
+    local pane_pid=""
+    local default_pane_pid=""
+    local client_pid=""
+    local debris=""
+    local process_id=""
+    local -a process_ids=()
+
+    root=$(manifest_value "$manifest" root)
+    state_directory=$(manifest_value "$manifest" state)
+    state_file="$state_directory/state"
+    runner_socket="$root/tmux-$UID/$RUNNER_SERVER_NAME"
+    default_socket="$root/tmux-$UID/default"
+    if [[ ! -S "$runner_socket" ]] || [[ ! -S "$default_socket" ]] || \
+        [[ "$runner_socket" == "$default_socket" ]]; then
+        printf 'Observation probe did not expose two separate sockets.\n' >&2
+        return 1
+    fi
+
+    runner_session=$(run_tmux "$root" list-sessions -F '#{session_name}')
+    default_session=$(
+        run_default_tmux "$root" list-sessions -F '#{session_name}'
+    )
+    if [[ "$runner_session" != "m7-observation" ]] || \
+        [[ "$default_session" != "m7-default-observation" ]]; then
+        printf 'Observation probe session isolation is wrong.\n' >&2
+        return 1
+    fi
+    runner_pane_count=$(run_tmux "$root" list-panes -a | wc -l)
+    default_pane_count=$(run_default_tmux "$root" list-panes -a | wc -l)
+    if [[ "$runner_pane_count" != "1" ]] || \
+        [[ "$default_pane_count" != "1" ]]; then
+        printf 'Observation probe pane inventory is wrong.\n' >&2
+        return 1
+    fi
+    client_session=$(current_client_sessions "$root")
+    if [[ "$client_session" != "m7-observation" ]]; then
+        printf 'Observation probe did not expose its live client.\n' >&2
+        return 1
+    fi
+
+    server_pid=$(run_tmux "$root" display-message -p '#{pid}')
+    default_server_pid=$(
+        run_default_tmux "$root" display-message -p '#{pid}'
+    )
+    pane_pid=$(run_tmux "$root" list-panes -a -F '#{pane_pid}')
+    default_pane_pid=$(
+        run_default_tmux "$root" list-panes -a -F '#{pane_pid}'
+    )
+    client_pid=$(run_tmux "$root" list-clients -F '#{client_pid}')
+    process_ids=(
+        "$server_pid" "$default_server_pid" "$pane_pid"
+        "$default_pane_pid" "$client_pid"
+    )
+    for process_id in "${process_ids[@]}"; do
+        if [[ ! "$process_id" =~ ^[0-9]+$ ]] || \
+            ! kill -0 "$process_id" 2>/dev/null; then
+            printf 'Observation process is not live: %s\n' \
+                "$process_id" >&2
+            return 1
+        fi
+        printf 'pid\t%s\n' "$process_id" >> "$manifest"
+    done
+
+    if [[ ! -s "$state_file" ]] || ! validate_main_state_record "$state_file"; then
+        printf 'Observation probe exposed invalid state.\n' >&2
+        return 1
+    fi
+    if [[ "$(stat -c '%a' "$state_directory")" != "700" ]] || \
+        [[ "$(stat -c '%a' "$state_file")" != "600" ]]; then
+        printf 'Observation probe exposed invalid state modes.\n' >&2
+        return 1
+    fi
+    debris=$(state_transaction_debris "$state_directory")
+    if [[ -n "$debris" ]]; then
+        printf 'Observation probe exposed transaction debris:\n%s\n' \
+            "$debris" >&2
+        return 1
+    fi
+    if directory_lock_available "$state_directory"; then
+        printf 'Observation directory lock was not held.\n' >&2
+        return 1
+    fi
+}
+
+function inspect_observation_after_cleanup {
+    local manifest="$1"
+    local root=""
+    local workspace=""
+    local state_directory=""
+
+    root=$(manifest_value "$manifest" root)
+    workspace=$(manifest_workspace "$manifest")
+    state_directory=$(manifest_value "$manifest" state)
+    if [[ -z "$workspace" ]] || [[ -e "$workspace" ]]; then
+        printf 'Observation child left its workspace: %s\n' \
+            "$workspace" >&2
+        return 1
+    fi
+    if [[ -e "$root/tmux-$UID/$RUNNER_SERVER_NAME" ]] || \
+        [[ -e "$root/tmux-$UID/default" ]] || [[ -e "$state_directory" ]]; then
+        printf 'Observation child left a socket or state path.\n' >&2
+        return 1
+    fi
+    if ! assert_manifest_processes_stopped "$manifest"; then
+        return 1
+    fi
+}
+
+function run_observation_supervisor {
+    local supervisor_workspace="$1"
+    local script_path="$TEST_DIR/test-tmux-runner.bash"
+    local manifest="$supervisor_workspace/observation.manifest"
+    local pre_ready="$supervisor_workspace/observation.pre-ready"
+    local start_release="$supervisor_workspace/observation.start-release"
+    local live_ready="$supervisor_workspace/observation.live-ready"
+    local finish_release="$supervisor_workspace/observation.finish-release"
+    local cleanup_done="$supervisor_workspace/observation.cleanup-done"
+    local child_pid=""
+    local child_rc=0
+
+    : > "$manifest"
+    env TMUX_RUNNER_TEST_CHILD=1 TMUX_RUNNER_TEST_OBSERVATION=1 \
+        TMUX_RUNNER_TEST_MANIFEST="$manifest" \
+        TMUX_RUNNER_TEST_VARIANT=source \
+        TMUX_RUNNER_TEST_RUNNER="$SOURCE_RUNNER" \
+        TMUX_RUNNER_TEST_COMPLETION="$SOURCE_COMPLETION" \
+        TMUX_RUNNER_TEST_PRE_READY="$pre_ready" \
+        TMUX_RUNNER_TEST_START_RELEASE="$start_release" \
+        TMUX_RUNNER_TEST_LIVE_READY="$live_ready" \
+        TMUX_RUNNER_TEST_FINISH_RELEASE="$finish_release" \
+        TMUX_RUNNER_TEST_CLEANUP_DONE="$cleanup_done" \
+        bash "$script_path" &
+    child_pid=$!
+
+    if ! wait_for_supervisor_file "$pre_ready"; then
+        printf 'Observation probe pre-release readiness timed out.\n' >&2
+        stop_observation_child "$child_pid" "$start_release" \
+            "$finish_release" "$cleanup_done"
+        return 1
+    fi
+    if ! inspect_observation_before_release "$manifest"; then
+        stop_observation_child "$child_pid" "$start_release" \
+            "$finish_release" "$cleanup_done"
+        return 1
+    fi
+    printf 'release\n' > "$start_release"
+    if ! wait_for_supervisor_file "$live_ready"; then
+        printf 'Observation probe live readiness timed out.\n' >&2
+        stop_observation_child "$child_pid" "$start_release" \
+            "$finish_release" "$cleanup_done"
+        return 1
+    fi
+    if ! inspect_observation_live "$manifest"; then
+        stop_observation_child "$child_pid" "$start_release" \
+            "$finish_release" "$cleanup_done"
+        return 1
+    fi
+    printf 'release\n' > "$finish_release"
+    if ! wait_for_supervisor_file "$cleanup_done"; then
+        printf 'Observation probe cleanup timed out.\n' >&2
+        stop_observation_child "$child_pid" "$start_release" \
+            "$finish_release" "$cleanup_done"
+        return 1
+    fi
+    wait "$child_pid" || child_rc=$?
+    if (( child_rc != 0 )); then
+        printf 'Observation probe failed with exit %d.\n' "$child_rc" >&2
+        return 1
+    fi
+    inspect_observation_after_cleanup "$manifest"
 }
 
 function run_forced_cleanup_probe {
     local root=""
+    local home=""
+    local xdg_home=""
+    local state_directory=""
+    local state_file=""
+    local session_path=""
     local probe_pid=""
 
     require_dependencies
+    unset XDG_STATE_HOME || true
     WORKSPACE=$(mktemp -d /tmp/tmux-runner-test.XXXXXX)
     record_manifest workspace "$WORKSPACE"
     mkdir -p -- "$WORKSPACE/pty"
     create_tmux_root cleanup-probe
     root="$NEW_TMUX_ROOT"
-    run_tmux "$root" -f /dev/null new-session -d -s cleanup-probe
+    home="$WORKSPACE/cleanup-probe/home"
+    xdg_home="$WORKSPACE/cleanup-probe/config"
+    session_path="$WORKSPACE/cleanup-probe/session"
+    state_directory="$home/.local/state/tmux-runner"
+    state_file="$state_directory/state"
+    mkdir -p -- "$home" "$xdg_home" "$session_path"
+    record_manifest state "$state_directory"
+    run_outside_success cleanup-probe-state "$root" "$home" "$xdg_home" \
+        "$RUNNER" cleanup-probe create -s cleanup-probe -c "$session_path"
+    if [[ ! -s "$state_file" ]] || ! validate_main_state_record "$state_file"; then
+        fail_test "forced cleanup probe did not create valid state"
+    fi
+    assert_no_state_transactions "$state_directory"
+    run_default_tmux "$root" -f /dev/null new-session -d \
+        -s cleanup-default
+    start_state_lock_holder cleanup-probe "$state_directory"
     setsid sleep 60 &
     probe_pid=$!
     EXTRA_PTY_PIDS+=("$probe_pid")
@@ -5269,41 +5789,113 @@ function run_forced_cleanup_probe {
     fail_test "forced cleanup probe"
 }
 
+function run_observation_probe {
+    local root=""
+    local home=""
+    local xdg_home=""
+    local state_directory=""
+    local state_file=""
+    local session_path=""
+    local pre_ready="${TMUX_RUNNER_TEST_PRE_READY:-}"
+    local start_release="${TMUX_RUNNER_TEST_START_RELEASE:-}"
+    local live_ready="${TMUX_RUNNER_TEST_LIVE_READY:-}"
+    local finish_release="${TMUX_RUNNER_TEST_FINISH_RELEASE:-}"
+
+    require_dependencies
+    unset XDG_STATE_HOME || true
+    if [[ -z "$pre_ready" ]] || [[ -z "$start_release" ]] || \
+        [[ -z "$live_ready" ]] || [[ -z "$finish_release" ]]; then
+        fail_test "observation probe control path is missing"
+    fi
+
+    WORKSPACE=$(mktemp -d /tmp/tmux-runner-test.XXXXXX)
+    record_manifest workspace "$WORKSPACE"
+    mkdir -p -- "$WORKSPACE/pty"
+    create_tmux_root m7-observation
+    root="$NEW_TMUX_ROOT"
+    home="$WORKSPACE/m7-observation/home"
+    xdg_home="$WORKSPACE/m7-observation/config"
+    session_path="$WORKSPACE/m7-observation/session"
+    state_directory="$home/.local/state/tmux-runner"
+    state_file="$state_directory/state"
+    mkdir -p -- "$home" "$xdg_home" "$session_path"
+    record_manifest state "$state_directory"
+    printf 'ready\n' > "$pre_ready"
+
+    if ! wait_for_supervisor_file "$start_release"; then
+        fail_test "observation probe start release timed out"
+    fi
+    run_outside_success m7-observation-create "$root" "$home" \
+        "$xdg_home" "$RUNNER" m7-observation create \
+        -s m7-observation -c "$session_path"
+    run_default_tmux "$root" -f /dev/null new-session -d \
+        -s m7-default-observation
+    start_source_client m7-observation "$root" "$home" "$xdg_home" \
+        m7-observation
+    if [[ ! -s "$state_file" ]] || ! validate_main_state_record "$state_file"; then
+        fail_test "observation probe state is invalid"
+    fi
+    assert_no_state_transactions "$state_directory"
+    start_state_lock_holder m7-observation "$state_directory"
+    printf 'ready\n' > "$live_ready"
+
+    if ! wait_for_supervisor_file "$finish_release"; then
+        fail_test "observation probe finish release timed out"
+    fi
+    stop_state_lock_holder m7-observation
+    detach_current_client
+    finish_current_pty
+    assert_last_pty_succeeded "observation probe client failed"
+}
+
 function run_supervisor {
     local script_path="$TEST_DIR/test-tmux-runner.bash"
-    local success_manifest=""
+    local supervisor_workspace=""
+    local source_manifest=""
+    local installed_manifest=""
     local failure_manifest=""
     local failure_output=""
-    local success_workspace=""
     local failure_workspace=""
+    local failure_state_directory=""
+    local failure_state_file=""
+    local failure_debris=""
+    local install_home=""
+    local install_config_home=""
+    local installed_runner=""
+    local installed_completion=""
     local socket_file=""
-    local child_rc=0
     local probe_rc=0
 
-    success_manifest=$(mktemp /tmp/tmux-runner-manifest.XXXXXX)
-    failure_manifest=$(mktemp /tmp/tmux-runner-manifest.XXXXXX)
-    failure_output=$(mktemp /tmp/tmux-runner-failure.XXXXXX)
+    supervisor_workspace=$(mktemp -d /tmp/tmux-runner-supervisor.XXXXXX)
+    source_manifest="$supervisor_workspace/source.manifest"
+    installed_manifest="$supervisor_workspace/installed.manifest"
+    failure_manifest="$supervisor_workspace/failure.manifest"
+    failure_output="$supervisor_workspace/failure.output"
+    install_home="$supervisor_workspace/installed home"
+    install_config_home="$supervisor_workspace/installed config"
+    installed_runner="$install_home/.local/bin/tmux-runner"
+    installed_completion="$install_home/.local/share/bash-completion/completions/tmux-runner"
 
-    TMUX_RUNNER_TEST_CHILD=1 \
-        TMUX_RUNNER_TEST_MANIFEST="$success_manifest" \
-        bash "$script_path" || child_rc=$?
-    success_workspace=$(manifest_workspace "$success_manifest")
-    if (( child_rc != 0 )); then
-        printf 'Test child failed with exit %d.\n' "$child_rc" >&2
-        remove_supervisor_control_files \
-            "$success_manifest" "$failure_manifest" "$failure_output"
-        return "$child_rc"
-    fi
-    if [[ -z "$success_workspace" ]] || [[ -e "$success_workspace" ]]; then
-        printf 'Passing child left its workspace: %s\n' \
-            "$success_workspace" >&2
-        remove_supervisor_control_files \
-            "$success_manifest" "$failure_manifest" "$failure_output"
+    if ! run_complete_child source "$SOURCE_RUNNER" "$SOURCE_COMPLETION" \
+        "$source_manifest"; then
+        remove_supervisor_control_files "$supervisor_workspace"
         return 1
     fi
-    if ! assert_manifest_processes_stopped "$success_manifest"; then
-        remove_supervisor_control_files \
-            "$success_manifest" "$failure_manifest" "$failure_output"
+    if ! env XDG_CONFIG_HOME="$install_config_home" \
+        make -C "$REPO_ROOT" HOME="$install_home" install; then
+        printf 'Supervisor make install failed.\n' >&2
+        remove_supervisor_control_files "$supervisor_workspace"
+        return 1
+    fi
+    if ! run_complete_child installed "$installed_runner" \
+        "$installed_completion" "$installed_manifest"; then
+        remove_supervisor_control_files "$supervisor_workspace"
+        return 1
+    fi
+    printf 'PASS M7-T3: complete source and installed integration suites\n'
+
+    if ! run_observation_supervisor "$supervisor_workspace"; then
+        remove_supervisor_control_files "$supervisor_workspace"
         return 1
     fi
 
@@ -5312,42 +5904,57 @@ function run_supervisor {
         bash "$script_path" > "$failure_output" 2>&1 || probe_rc=$?
     if (( probe_rc == 0 )); then
         printf 'Forced cleanup probe unexpectedly succeeded.\n' >&2
-        remove_supervisor_control_files \
-            "$success_manifest" "$failure_manifest" "$failure_output"
+        remove_supervisor_control_files "$supervisor_workspace"
         return 1
     fi
     failure_workspace=$(manifest_workspace "$failure_manifest")
     if [[ -z "$failure_workspace" ]] || [[ ! -d "$failure_workspace" ]]; then
         printf 'Forced failure did not preserve its workspace.\n' >&2
-        remove_supervisor_control_files \
-            "$success_manifest" "$failure_manifest" "$failure_output"
+        remove_supervisor_control_files "$supervisor_workspace"
         return 1
     fi
     if ! grep -F -- "Diagnostic workspace: $failure_workspace" \
         "$failure_output" >/dev/null; then
         printf 'Forced failure did not report its workspace.\n' >&2
-        remove_supervisor_control_files \
-            "$success_manifest" "$failure_manifest" "$failure_output"
+        remove_supervisor_control_files "$supervisor_workspace"
         return 1
     fi
     if ! assert_manifest_processes_stopped "$failure_manifest"; then
-        remove_supervisor_control_files \
-            "$success_manifest" "$failure_manifest" "$failure_output"
+        remove_supervisor_control_files "$supervisor_workspace"
+        return 1
+    fi
+    failure_state_directory=$(manifest_value "$failure_manifest" state)
+    failure_state_file="$failure_state_directory/state"
+    if [[ ! -s "$failure_state_file" ]] || \
+        ! validate_main_state_record "$failure_state_file"; then
+        printf 'Forced failure did not preserve valid state.\n' >&2
+        remove_supervisor_control_files "$supervisor_workspace"
+        return 1
+    fi
+    failure_debris=$(state_transaction_debris "$failure_state_directory")
+    if [[ -n "$failure_debris" ]]; then
+        printf 'Forced failure left transaction debris:\n%s\n' \
+            "$failure_debris" >&2
+        remove_supervisor_control_files "$supervisor_workspace"
+        return 1
+    fi
+    if ! directory_lock_available "$failure_state_directory"; then
+        printf 'Forced failure did not release the state directory lock.\n' >&2
+        remove_supervisor_control_files "$supervisor_workspace"
         return 1
     fi
     socket_file=$(find "$failure_workspace" -type s -print -quit)
     if [[ -n "$socket_file" ]]; then
         printf 'Forced failure left a socket: %s\n' "$socket_file" >&2
-        remove_supervisor_control_files \
-            "$success_manifest" "$failure_manifest" "$failure_output"
+        remove_supervisor_control_files "$supervisor_workspace"
         return 1
     fi
 
     chmod -R u+w -- "$failure_workspace"
     rm -rf -- "$failure_workspace"
-    remove_supervisor_control_files \
-        "$success_manifest" "$failure_manifest" "$failure_output"
+    remove_supervisor_control_files "$supervisor_workspace"
     printf 'PASS M3-T5: outer supervisor cleanup and failure retention\n'
+    printf 'PASS M7-T4: live isolation, cleanup, and failure evidence\n'
 }
 
 function main {
@@ -5384,12 +5991,17 @@ function main {
     test_m6_t3_state_failures_and_recovery
     test_m6_t4_concurrent_state
     test_m6_t5_interface_regression
-    printf 'PASS: %d milestone checks completed\n' "$TESTS_PASSED"
+    test_m7_t1_installation
+    test_m7_t2_interface_bundle
+    printf 'PASS: %d milestone checks completed (%s)\n' \
+        "$TESTS_PASSED" "$TEST_VARIANT"
 }
 
 if [[ "${TMUX_RUNNER_TEST_CHILD:-}" == "1" ]]; then
     if [[ "${TMUX_RUNNER_TEST_FORCE_FAILURE:-}" == "1" ]]; then
         run_forced_cleanup_probe
+    elif [[ "${TMUX_RUNNER_TEST_OBSERVATION:-}" == "1" ]]; then
+        run_observation_probe
     else
         main "$@"
     fi

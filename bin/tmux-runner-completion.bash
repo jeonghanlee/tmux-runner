@@ -60,7 +60,7 @@ function _tmux_runner {
                 _tmux_runner_complete_sessions "$current"
             elif [[ "$current" == -* ]]; then
                 mapfile -t COMPREPLY < <(
-                    compgen -W '-t -h --help' -- "$current"
+                    compgen -W '-t -- -h --help' -- "$current"
                 )
             elif (( COMP_CWORD == 2 )); then
                 _tmux_runner_complete_sessions "$current"

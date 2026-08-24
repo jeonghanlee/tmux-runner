@@ -17,8 +17,8 @@ Canonical branch or ref: master
 Git upstream: origin/master
 Remote tracker: none
 
-Next session entry point: record the M6 carrying commit, then implement M7
-against the accepted plan in this document.
+Next session entry point: commit the reviewed M7 release candidate, then run
+M7 / T5 against its clean committed tree and fresh installation.
 
 ## Milestone
 
@@ -31,10 +31,10 @@ against the accepted plan in this document.
 | Server | M3 | Isolate the runner server and local tmux configuration | Milestone | Complete | No | M2, D13, D14, D17 | Complete 2026-08-24, carrying commit `89095fb`; M3 / T1-T5 and both requested reviews accepted; [detail](#m3---isolate-the-runner-server-and-local-tmux-configuration) |
 | Identity | M4 | Resolve repository and working-directory identity | Milestone | Complete | No | M3, D16 | Complete 2026-08-24, carrying commit `8caaea1`; M4 / T1-T5 and both requested reviews accepted; [detail](#m4---resolve-repository-and-working-directory-identity) |
 | Discovery | M5 | Discover configured repositories and select one | Milestone | Complete | No | M4, D15, D17 | Complete 2026-08-24, carrying commit `71ce91f`; M5 / T1-T5 and both requested reviews accepted; [detail](#m5---discover-configured-repositories-and-select-one) |
-| Navigation | M6 | Add recent and previous-session navigation | Milestone | In progress | No | M5, D18 | Implementation, M6 / T1-T5, and the third-person review are complete; the completion mark rides the M7 update; [detail](#m6---add-recent-and-previous-session-navigation) |
-| Integration | M7 | Complete integrated verification and release preparation | Milestone | Not started | No | M3, M4, M5, M6, D17 | Starts after M3-M6; [detail](#m7---complete-integrated-verification-and-release-preparation) |
+| Navigation | M6 | Add recent and previous-session navigation | Milestone | Complete | No | M5, D18 | Complete 2026-08-24, carrying commit `1a46fca`; M6 / T1-T5 and both requested reviews accepted; [detail](#m6---add-recent-and-previous-session-navigation) |
+| Integration | M7 | Complete integrated verification and release preparation | Milestone | In progress | No | M3, M4, M5, M6, D17 | M7 / T1-T4 and the stage review cycle passed; the carrying commit and clean-candidate M7 / T5 remain; [detail](#m7---complete-integrated-verification-and-release-preparation) |
 
-Milestone tally: Complete 5, In progress 1, Not started 1.
+Milestone tally: Complete 6, In progress 1, Not started 0.
 
 ### Decisions
 
@@ -650,7 +650,7 @@ Superseded Plan Artifacts: none
 Origin: a158012 / M6
 Identity History: none
 GitHub Issue: none
-Status: In progress
+Status: Complete
 
 ##### Summary
 
@@ -773,15 +773,16 @@ Superseded Plan Artifacts: none
 - The third-person review reproduced the three-client same-sequence
   acknowledgment race and accepted the retained-ticket correction after the
   full shipped suite passed with no transaction debris.
-- The M7 register update records the M6 second-person acceptance and carrying
-  commit.
+- The second-person review accepted the installed help, completion,
+  repository, navigation, state, and cleanup paths; carrying commit
+  `1a46fca` contains the reviewed implementation.
 
 #### M7 - Complete integrated verification and release preparation
 
 Origin: a158012 / M7
 Identity History: none
 GitHub Issue: none
-Status: Not started
+Status: In progress
 
 ##### Summary
 
@@ -870,15 +871,32 @@ Superseded Plan Artifacts: none
 
 | Label | Observed At | Environment | Result | Evidence |
 | --- | --- | --- | --- | --- |
-| T1 | Pending | Pending | Pending | Implementation has not started. |
-| T2 | Pending | Pending | Pending | Implementation has not started. |
-| T3 | Pending | Pending | Pending | Implementation has not started. |
-| T4 | Pending | Pending | Pending | Implementation has not started. |
-| T5 | Pending | Pending | Pending | Implementation has not started. |
+| T1 | 2026-08-24 | GNU Make, temporary spaced `HOME` and XDG paths, source artifacts, installed artifacts, and real dedicated tmux servers | Pass | The expected three-file installation had modes `0755`, `0644`, and `0644`; the source config matched the first installed config byte for byte, a changed local config survived reinstall, generated metadata was valid, and the preserved config started a cold installed server. |
+| T2 | 2026-08-24 | Source and installed runners and completion, fresh temporary homes, real dedicated tmux servers, and the shipped README | Pass | Every command and alias help form, version alias, command, option, session, and directory completion set matched the CLI; documented dependency, isolation, detach, and `attach --` behavior executed as stated. |
+| T3 | 2026-08-24 | Source tree and fresh installed copy, real dedicated and default tmux servers, Git repositories and linked worktrees, PTYs, FIFOs, XDG paths, and controlled concurrency | Pass | Both complete passes reported 30 milestone checks; every M1-M7 contract ran through the shipped runner, completion, installation, and real external boundaries. |
+| T4 | 2026-08-24 | Outer process supervisor, real tmux queries, Linux process and filesystem inspection, and controlled successful and forced-failure children | Pass | Before, during, and after observation confirmed separate sockets and sessions, live servers, panes and client, valid mode-protected state, a held then released directory lock, terminated processes, removed success resources, and a reported failure workspace containing valid state without socket or transaction debris. |
+| T5 | Pending | Clean committed candidate and fresh local installation | Pending | Run only after the reviewed implementation commit establishes the candidate hash and clean repository state. |
 
 ##### Closure Evidence
 
-- None; implementation has not started.
+- `bash tests/test-tmux-runner.bash` passed 30 source checks, 30 installed
+  checks, full source-to-install integration, and live success and failure
+  resource inspection through real tmux, Git, PTY, filesystem, and XDG paths.
+- `bash -n`, ShellCheck, and `git diff --check` passed for the changed Bash,
+  completion, test, and documentation paths.
+- The first-person retrospective identified and corrected completion,
+  dependency, detach-binding, default-server boundary, live-observation, and
+  installed-completion ShellCheck assumptions; no unresolved loose end
+  remained within M7 / T1-T4.
+- The third-person review read every changed artifact and independently passed
+  the 30-check source and installed suites, M7 / T3-T4, and an optional-tool-
+  free `ls` and real PTY `attach --` path; it reported no must-fix or minor
+  finding and accepted the implementation.
+- The second-person review followed the complete fresh-user installation,
+  configuration, command, detach, isolation, navigation, help, completion,
+  verification, and resume paths; it reported no finding and accepted the
+  reader-facing result.
+- The carrying commit and M7 / T5 clean-candidate evidence remain pending.
 
 ## Backlog
 

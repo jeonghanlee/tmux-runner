@@ -103,6 +103,7 @@ function print_usage {
     printf '  -h, --help     Show this help and exit.\n'
     printf '\nServer:\n'
     printf '  Session commands use the dedicated tmux -L tmux-runner server.\n'
+    printf '  Default-server sessions are not migrated or visible.\n'
     # The help text documents the shell fallback expression literally.
     # shellcheck disable=SC2016
     printf '  Config: ${XDG_CONFIG_HOME:-$HOME/.config}/tmux-runner/tmux.conf\n'
