@@ -16,14 +16,24 @@ GIT_BIN=$(type -P git || true)
 readonly GIT_BIN
 SHA256_BIN=$(type -P sha256sum || true)
 readonly SHA256_BIN
+FIND_BIN=$(type -P find || true)
+readonly FIND_BIN
+SORT_BIN=$(type -P sort || true)
+readonly SORT_BIN
 MANAGED_SESSION_NAMES=()
 MANAGED_SESSION_PATHS=()
 PATH_MATCHES=()
+REPOSITORY_ROOTS=()
+CATALOG_PATHS=()
+CATALOG_LABELS=()
+CATALOG_DEPTHS=()
+CATALOG_DUPLICATES=()
 
 function print_usage {
     printf 'Usage:\n'
     printf '  %s create [-s <session-name>] [-c <folder>]\n' "$PROGRAM_NAME"
     printf '  %s c [-s <session-name>] [-c <folder>]\n' "$PROGRAM_NAME"
+    printf '  %s repo\n' "$PROGRAM_NAME"
     printf '  %s ls\n' "$PROGRAM_NAME"
     printf '  %s attach -t <session-name>\n' "$PROGRAM_NAME"
     printf '  %s attach <session-name>\n' "$PROGRAM_NAME"
@@ -33,6 +43,7 @@ function print_usage {
     printf '  %s a -- <session-name>\n' "$PROGRAM_NAME"
     printf '\nCommands:\n'
     printf '  create, c  Create or reuse a session and enter it.\n'
+    printf '  repo       Discover repositories, select one, and enter it.\n'
     printf '  ls         List sessions, select one by number, and enter it.\n'
     printf '  attach, a  Enter an existing session by name.\n'
     printf '\nOptions:\n'
@@ -133,6 +144,18 @@ function print_list_help {
     printf '\nList complete tmux session rows, select one by number, and enter it.\n'
     printf '\nOptions:\n'
     printf '  -h, --help  Show this help and exit.\n'
+}
+
+function print_repo_help {
+    printf 'Usage: %s repo\n' "$PROGRAM_NAME"
+    printf '\nDiscover configured Git working trees, select one by number, and enter it.\n'
+    printf '\nOptions:\n'
+    printf '  -h, --help  Show this help and exit.\n'
+    printf '\nConfiguration:\n'
+    # The help text documents the shell fallback expression literally.
+    # shellcheck disable=SC2016
+    printf '  ${XDG_CONFIG_HOME:-$HOME/.config}/tmux-runner/repos\n'
+    printf '  Add one literal absolute search root per line.\n'
 }
 
 function print_attach_usage {
@@ -463,6 +486,306 @@ function has_same_base_collision {
     return 1
 }
 
+function runner_repos_file {
+    local config_home="${XDG_CONFIG_HOME:-${HOME}/.config}"
+
+    printf '%s/tmux-runner/repos\n' "$config_home"
+}
+
+function report_repos_setup_error {
+    local message="$1"
+    local repos_file="$2"
+
+    fail "$message: $repos_file"
+    printf 'Add one literal absolute search root per line.\n' >&2
+    return 2
+}
+
+function warn_repository_root {
+    local message="$1"
+    local root_path="$2"
+
+    printf '%s: warning: %s: %s\n' \
+        "$PROGRAM_NAME" "$message" "$root_path" >&2
+}
+
+function load_repository_roots {
+    local required="$1"
+    local repos_file=""
+    local line=""
+    local canonical_root=""
+    local -A seen_roots=()
+
+    REPOSITORY_ROOTS=()
+    repos_file=$(runner_repos_file)
+    if [[ ! -e "$repos_file" ]]; then
+        if (( required )); then
+            report_repos_setup_error "repository root file is missing" \
+                "$repos_file"
+            return
+        fi
+        return 1
+    fi
+    if [[ ! -f "$repos_file" ]] || [[ ! -r "$repos_file" ]]; then
+        report_repos_setup_error "repository root file is not readable" \
+            "$repos_file"
+        return
+    fi
+
+    while IFS= read -r line || [[ -n "$line" ]]; do
+        line="${line%$'\r'}"
+        if [[ "$line" =~ ^[[:space:]]*$ ]] || \
+            [[ "$line" =~ ^[[:space:]]*# ]]; then
+            continue
+        fi
+        if [[ "$line" != /* ]]; then
+            warn_repository_root "repository root is not absolute" "$line"
+            continue
+        fi
+        if [[ ! -d "$line" ]]; then
+            warn_repository_root "repository root is missing" "$line"
+            continue
+        fi
+        if [[ ! -r "$line" ]] || [[ ! -x "$line" ]]; then
+            warn_repository_root "repository root is not accessible" "$line"
+            continue
+        fi
+        if ! canonical_root=$(cd -- "$line" 2>/dev/null && pwd -P); then
+            warn_repository_root "repository root is not accessible" "$line"
+            continue
+        fi
+        if [[ -z "${seen_roots[$canonical_root]+present}" ]]; then
+            seen_roots["$canonical_root"]=1
+            REPOSITORY_ROOTS+=("$canonical_root")
+        fi
+    done < "$repos_file"
+
+    if (( ${#REPOSITORY_ROOTS[@]} == 0 )); then
+        if (( required )); then
+            report_repos_setup_error "repository root file has no usable roots" \
+                "$repos_file"
+            return
+        fi
+        return 1
+    fi
+}
+
+function is_git_worktree_path {
+    local candidate_path="$1"
+    local inside_work_tree=""
+    local bare_repository=""
+    local git_top=""
+    local physical_top=""
+
+    inside_work_tree=$("$GIT_BIN" -C "$candidate_path" rev-parse \
+        --is-inside-work-tree 2>/dev/null) || return 1
+    [[ "$inside_work_tree" == "true" ]] || return 1
+    bare_repository=$("$GIT_BIN" -C "$candidate_path" rev-parse \
+        --is-bare-repository 2>/dev/null) || return 1
+    [[ "$bare_repository" == "false" ]] || return 1
+    git_top=$("$GIT_BIN" -C "$candidate_path" rev-parse --show-toplevel \
+        2>/dev/null) || return 1
+    physical_top=$(cd -- "$git_top" 2>/dev/null && pwd -P) || return 1
+    [[ "$physical_top" == "$candidate_path" ]]
+}
+
+function discover_repository_catalog {
+    local required="$1"
+    local repos_file=""
+    local root_path=""
+    local marker_path=""
+    local candidate_path=""
+    local -a markers=()
+    local -A seen_paths=()
+
+    CATALOG_PATHS=()
+    for root_path in "${REPOSITORY_ROOTS[@]}"; do
+        markers=()
+        while IFS= read -r -d '' marker_path; do
+            markers+=("$marker_path")
+        done < <(
+            "$FIND_BIN" -P "$root_path" \
+                \( -type d -name .git -print0 -prune \) -o \
+                \( -type f -name .git -print0 \)
+        )
+        for marker_path in "${markers[@]}"; do
+            candidate_path="${marker_path%/.git}"
+            if ! candidate_path=$(cd -- "$candidate_path" 2>/dev/null && \
+                pwd -P); then
+                continue
+            fi
+            if is_git_worktree_path "$candidate_path" && \
+                [[ -z "${seen_paths[$candidate_path]+present}" ]]; then
+                seen_paths["$candidate_path"]=1
+                CATALOG_PATHS+=("$candidate_path")
+            fi
+        done
+    done
+
+    if (( ${#CATALOG_PATHS[@]} > 0 )); then
+        mapfile -t CATALOG_PATHS < <(
+            printf '%s\n' "${CATALOG_PATHS[@]}" | \
+                LC_ALL=C "$SORT_BIN" -u
+        )
+        return 0
+    fi
+    if (( required )); then
+        repos_file=$(runner_repos_file)
+        fail "no Git working trees found under roots in: $repos_file"
+        return
+    fi
+    return 1
+}
+
+function catalog_labels_have_duplicate {
+    local first_index=0
+    local second_index=0
+
+    CATALOG_DUPLICATES=()
+    for first_index in "${!CATALOG_PATHS[@]}"; do
+        CATALOG_DUPLICATES+=(0)
+    done
+    for first_index in "${!CATALOG_LABELS[@]}"; do
+        for ((second_index = first_index + 1; \
+            second_index < ${#CATALOG_LABELS[@]}; second_index++)); do
+            if [[ "${CATALOG_LABELS[$first_index]}" == \
+                "${CATALOG_LABELS[$second_index]}" ]]; then
+                CATALOG_DUPLICATES[first_index]=1
+                CATALOG_DUPLICATES[second_index]=1
+            fi
+        done
+    done
+    for first_index in "${!CATALOG_DUPLICATES[@]}"; do
+        if (( CATALOG_DUPLICATES[first_index] )); then
+            return 0
+        fi
+    done
+    return 1
+}
+
+function catalog_label_is_used {
+    local candidate_label="$1"
+    local current_index="$2"
+    local index=0
+
+    for index in "${!CATALOG_LABELS[@]}"; do
+        if (( index == current_index )); then
+            continue
+        fi
+        if [[ "${CATALOG_LABELS[$index]}" == "$candidate_label" ]]; then
+            return 0
+        fi
+    done
+    return 1
+}
+
+function build_catalog_labels {
+    local index=0
+    local parent_count=0
+    local made_progress=0
+    local stem=""
+    local hash_output=""
+    local path_hash=""
+    local candidate_label=""
+    local hash_length=12
+
+    CATALOG_LABELS=()
+    CATALOG_DEPTHS=()
+    for index in "${!CATALOG_PATHS[@]}"; do
+        CATALOG_LABELS+=("")
+        CATALOG_DEPTHS+=(0)
+    done
+
+    while true; do
+        for index in "${!CATALOG_PATHS[@]}"; do
+            stem=$(path_stem_at_depth "${CATALOG_PATHS[$index]}" \
+                "${CATALOG_DEPTHS[$index]}")
+            CATALOG_LABELS[index]=$(normalize_session_name "$stem")
+        done
+        if ! catalog_labels_have_duplicate; then
+            return 0
+        fi
+        made_progress=0
+        for index in "${!CATALOG_PATHS[@]}"; do
+            if (( ! CATALOG_DUPLICATES[index] )); then
+                continue
+            fi
+            parent_count=$(path_parent_count "${CATALOG_PATHS[$index]}")
+            if (( CATALOG_DEPTHS[index] < parent_count )); then
+                CATALOG_DEPTHS[index]=$((CATALOG_DEPTHS[index] + 1))
+                made_progress=1
+            fi
+        done
+        if (( ! made_progress )); then
+            break
+        fi
+    done
+
+    if [[ -z "$SHA256_BIN" ]] || [[ ! -x "$SHA256_BIN" ]]; then
+        fail "sha256sum is required to resolve repository-label collisions"
+        return
+    fi
+    for index in "${!CATALOG_PATHS[@]}"; do
+        if (( ! CATALOG_DUPLICATES[index] )); then
+            continue
+        fi
+        hash_output=$(printf '%s' "${CATALOG_PATHS[$index]}" | \
+            "$SHA256_BIN")
+        path_hash="${hash_output%% *}"
+        for ((hash_length = 12; hash_length <= 64; hash_length++)); do
+            candidate_label="${CATALOG_LABELS[$index]}-${path_hash:0:hash_length}"
+            if ! catalog_label_is_used "$candidate_label" "$index"; then
+                CATALOG_LABELS[index]="$candidate_label"
+                break
+            fi
+        done
+        if catalog_label_is_used "${CATALOG_LABELS[$index]}" "$index"; then
+            fail "no unique repository label is available for path: ${CATALOG_PATHS[$index]}"
+            return
+        fi
+    done
+}
+
+function load_repository_catalog {
+    local required="$1"
+    local load_rc=0
+
+    load_repository_roots "$required" || load_rc=$?
+    if (( load_rc != 0 )); then
+        return "$load_rc"
+    fi
+    if [[ -z "$GIT_BIN" ]] || [[ ! -x "$GIT_BIN" ]]; then
+        fail "git is not available in PATH"
+        return
+    fi
+    if [[ -z "$FIND_BIN" ]] || [[ ! -x "$FIND_BIN" ]]; then
+        fail "find is not available in PATH"
+        return
+    fi
+    if [[ -z "$SORT_BIN" ]] || [[ ! -x "$SORT_BIN" ]]; then
+        fail "sort is not available in PATH"
+        return
+    fi
+    discover_repository_catalog "$required" || load_rc=$?
+    if (( load_rc != 0 )); then
+        return "$load_rc"
+    fi
+    build_catalog_labels
+}
+
+function catalog_label_for_path {
+    local canonical_path="$1"
+    local index=0
+
+    for index in "${!CATALOG_PATHS[@]}"; do
+        if [[ "${CATALOG_PATHS[$index]}" == "$canonical_path" ]]; then
+            printf '%s\n' "${CATALOG_LABELS[$index]}"
+            return 0
+        fi
+    done
+    return 1
+}
+
 function connect_auto_path {
     local canonical_path="$1"
     local candidate_name="$2"
@@ -580,6 +903,79 @@ function enter_automatic_path {
     fail "no unique session name is available for path: $canonical_path"
 }
 
+function enter_catalog_path {
+    local canonical_path="$1"
+    local catalog_label="$2"
+    local short_hostname="$3"
+    local candidate_name=""
+    local hash_output=""
+    local path_hash=""
+    local hash_length=12
+    local attempt_rc=0
+
+    load_managed_sessions
+    find_path_matches "$canonical_path"
+    if (( ${#PATH_MATCHES[@]} > 1 )); then
+        report_ambiguous_path "$canonical_path"
+        return
+    fi
+    if (( ${#PATH_MATCHES[@]} == 1 )); then
+        connect_verified_path "${PATH_MATCHES[0]}" "$canonical_path"
+        return
+    fi
+
+    candidate_name=$(normalize_session_name \
+        "${catalog_label}-${short_hostname}")
+    try_marked_session "$candidate_name" "$canonical_path" || attempt_rc=$?
+    if (( attempt_rc == 0 )); then
+        connect_auto_path "$canonical_path" "$candidate_name"
+        return
+    fi
+    if (( attempt_rc != 3 )); then
+        return "$attempt_rc"
+    fi
+
+    if [[ -z "$SHA256_BIN" ]] || [[ ! -x "$SHA256_BIN" ]]; then
+        fail "sha256sum is required to resolve this catalog session-name collision"
+        return
+    fi
+    hash_output=$(printf '%s' "$canonical_path" | "$SHA256_BIN")
+    path_hash="${hash_output%% *}"
+    for ((hash_length = 12; hash_length <= 64; hash_length++)); do
+        candidate_name=$(normalize_session_name \
+            "${catalog_label}-${path_hash:0:hash_length}-${short_hostname}")
+        attempt_rc=0
+        try_marked_session "$candidate_name" "$canonical_path" || \
+            attempt_rc=$?
+        if (( attempt_rc == 0 )); then
+            connect_auto_path "$canonical_path" "$candidate_name"
+            return
+        fi
+        if (( attempt_rc != 3 )); then
+            return "$attempt_rc"
+        fi
+    done
+    fail "no unique catalog session name is available for path: $canonical_path"
+}
+
+function revalidate_catalog_path {
+    local selected_path="$1"
+    local physical_path=""
+
+    if ! physical_path=$(cd -- "$selected_path" 2>/dev/null && pwd -P); then
+        fail "selected repository is no longer accessible: $selected_path"
+        return
+    fi
+    if [[ "$physical_path" != "$selected_path" ]]; then
+        fail "selected repository path changed after listing: $selected_path"
+        return
+    fi
+    if ! is_git_worktree_path "$selected_path"; then
+        fail "selected path is no longer a Git working tree: $selected_path"
+        return
+    fi
+}
+
 function runner_config_file {
     local config_home="${XDG_CONFIG_HOME:-${HOME}/.config}"
 
@@ -635,6 +1031,8 @@ function run_create {
     local directory=""
     local resolved_directory=""
     local canonical_path=""
+    local catalog_label=""
+    local catalog_rc=0
     local short_hostname=""
     local saw_session=0
     local saw_directory=0
@@ -706,7 +1104,70 @@ function run_create {
         return
     fi
     short_hostname=$("$HOSTNAME_BIN" -s)
+    load_repository_catalog 0 || catalog_rc=$?
+    if (( catalog_rc == 0 )) && \
+        catalog_label=$(catalog_label_for_path "$canonical_path"); then
+        enter_catalog_path "$canonical_path" "$catalog_label" \
+            "$short_hostname"
+        return
+    fi
+    if (( catalog_rc != 0 && catalog_rc != 1 )); then
+        return "$catalog_rc"
+    fi
     enter_automatic_path "$canonical_path" "$short_hostname"
+}
+
+function run_repo {
+    local selection=""
+    local selected_index=-1
+    local selected_path=""
+    local selected_label=""
+    local short_hostname=""
+    local index=0
+
+    if (( $# > 0 )); then
+        fail "repo does not accept arguments"
+        return
+    fi
+    load_repository_catalog 1 || return
+
+    for index in "${!CATALOG_PATHS[@]}"; do
+        printf '%d %s  %s\n' "$((index + 1))" \
+            "${CATALOG_LABELS[$index]}" "${CATALOG_PATHS[$index]}"
+    done
+    printf 'Select repository: '
+    if ! IFS= read -r selection; then
+        printf '\n' >&2
+        fail "no repository selection received"
+        return
+    fi
+    if [[ ! "$selection" =~ ^[0-9]+$ ]]; then
+        fail "repository selection must be a number"
+        return
+    fi
+    while [[ "${#selection}" -gt 1 ]] && \
+        [[ "${selection:0:1}" == "0" ]]; do
+        selection="${selection:1}"
+    done
+    for index in "${!CATALOG_PATHS[@]}"; do
+        if [[ "$selection" == "$((index + 1))" ]]; then
+            selected_index=$index
+            break
+        fi
+    done
+    if (( selected_index < 0 )); then
+        fail "repository selection is outside the displayed range"
+        return
+    fi
+    selected_path="${CATALOG_PATHS[$selected_index]}"
+    selected_label="${CATALOG_LABELS[$selected_index]}"
+    revalidate_catalog_path "$selected_path" || return
+    if [[ -z "$HOSTNAME_BIN" ]] || [[ ! -x "$HOSTNAME_BIN" ]]; then
+        fail "hostname is not available in PATH"
+        return
+    fi
+    short_hostname=$("$HOSTNAME_BIN" -s)
+    enter_catalog_path "$selected_path" "$selected_label" "$short_hostname"
 }
 
 function run_attach {
@@ -848,6 +1309,12 @@ function main {
                 return 0
             fi
             ;;
+        repo)
+            if (( $# == 1 )) && [[ "$1" == "-h" || "$1" == "--help" ]]; then
+                print_repo_help
+                return 0
+            fi
+            ;;
         ls)
             if (( $# == 1 )) && [[ "$1" == "-h" || "$1" == "--help" ]]; then
                 print_list_help
@@ -877,6 +1344,9 @@ function main {
     case "$command_name" in
         create|c)
             run_create "$command_name" "$@"
+            ;;
+        repo)
+            run_repo "$@"
             ;;
         attach|a)
             run_attach "$command_name" "$@"

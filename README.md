@@ -29,6 +29,12 @@ worktree therefore remains distinct from its main working tree. Outside Git,
 the physical directory itself is the identity. Each managed session stores
 that canonical path in the tmux session option `@tmux-runner-path`.
 
+Repository discovery reads
+`${XDG_CONFIG_HOME:-$HOME/.config}/tmux-runner/repos`, finds candidate `.git`
+directories and files without following directory symlinks, and asks real Git
+to validate each physical working-tree top level. Canonical results are
+deduplicated and sorted before labels or selection numbers are assigned.
+
 ## Requirements
 
 Session commands require Bash 4 or later and tmux. `create` also requires Git
@@ -36,6 +42,8 @@ to distinguish working trees from ordinary directories. An automatic
 `create` requires `hostname`; `sha256sum` is required when parent components
 cannot produce an available distinct name, including normalized path
 collisions. `ls` and `attach` do not use Git or `hostname`.
+`repo`, and automatic `create` when a usable repository catalog is configured,
+also require `find` and `sort`.
 
 Installation additionally requires GNU Make, `install`, `date`, and `sed` to
 copy the runner and stamp its Git and installation metadata. Confirm that the
@@ -47,6 +55,8 @@ command -v bash
 command -v tmux
 command -v hostname
 command -v sha256sum
+command -v find
+command -v sort
 command -v make
 command -v install
 command -v git
@@ -61,6 +71,7 @@ make --version
 | Command | Purpose |
 | --- | --- |
 | `create`, `c` | Create or reuse a session and enter it immediately. |
+| `repo` | Discover configured repositories, select one, and enter it. |
 | `ls` | List sessions, select one by number, and enter it. |
 | `attach`, `a` | Enter an existing session by exact name. |
 
@@ -89,6 +100,13 @@ its stored path matches; an unmarked or differently marked name produces an
 error. An automatic request that finds multiple sessions for one path also
 fails and prints their exact names for direct attachment.
 
+Discover configured repositories, choose one by number, and create or reuse
+its session:
+
+```text
+tmux-runner repo
+```
+
 List complete `tmux ls` rows, choose one by number, and enter it:
 
 ```text
@@ -112,6 +130,42 @@ Every supplied or derived session name replaces `.` and `:` with `_`.
 Attachment, switching, and existence checks use tmux's exact-match `=` prefix,
 so a shorter name does not select a longer session with the same prefix.
 
+## Repository Catalog
+
+The repository catalog file contains one literal absolute search root per
+line:
+
+```text
+/home/user/gitsrc
+/srv/project repositories
+```
+
+Blank lines and full-line comments are ignored. Paths are not evaluated as
+shell syntax: `~`, variables, globs, and command substitutions remain literal.
+Configured roots are resolved to physical paths and deduplicated. Missing,
+relative, or inaccessible roots produce warnings and do not stop discovery in
+the remaining roots. A missing file or a file without usable roots makes
+`repo` exit with the expected config path and setup form.
+
+Discovery includes a configured root that is itself a Git working tree,
+nested working trees, and linked worktrees. Bare repositories and ordinary
+directories are excluded. Overlapping roots and symbolic-link aliases do not
+duplicate results, and directory symlinks are not followed. `repo` prints each
+stable label together with the complete canonical path, then always waits for
+a number, even when there is one result.
+
+When repository basenames collide, catalog labels add the minimum parent
+components required to distinguish the complete catalog. Labels that still
+match after `.` and `:` normalization add a deterministic canonical-path
+SHA-256 prefix. The catalog therefore gives the same new session name
+regardless of selection order. Automatic `create` uses the same label for a
+catalogued path, while any existing exact path-marked session is reused under
+its current name. The selected path and real Git top level are checked again
+immediately before any tmux change.
+
+`tmux-runner ls` remains a selector for current sessions only; it does not show
+repository catalog entries.
+
 ## Help
 
 Show the complete command summary or help for one command:
@@ -120,6 +174,7 @@ Show the complete command summary or help for one command:
 tmux-runner --help
 tmux-runner --version
 tmux-runner create --help
+tmux-runner repo --help
 tmux-runner ls --help
 tmux-runner attach --help
 ```
@@ -153,8 +208,9 @@ deployment identity when it is executed outside the repository.
 ## Bash Completion
 
 The completion file supplies commands, `-h` and `--help`, command options,
-directories after `-c`, and live session names for `attach` and `a`. Session
-lookup always uses the dedicated `tmux-runner` server.
+directories after `-c`, and live session names for `attach` and `a`. It also
+supplies the help options for `repo`. Session lookup always uses the dedicated
+`tmux-runner` server.
 
 ## Installation
 
@@ -187,6 +243,18 @@ Register the installed completion in the current Bash session:
 
 ```bash
 source ~/.local/share/bash-completion/completions/tmux-runner
+```
+
+Installation does not create or replace the local `repos` catalog. From an
+existing Git working tree, create it with that repository as the first search
+root. Replace `repository_root` with another existing absolute directory when
+a broader catalog is wanted:
+
+```bash
+repository_root=$(git rev-parse --show-toplevel)
+mkdir -p "${XDG_CONFIG_HOME:-$HOME/.config}/tmux-runner"
+printf '%s\n' "$repository_root" > "${XDG_CONFIG_HOME:-$HOME/.config}/tmux-runner/repos"
+tmux-runner repo
 ```
 
 A different test home and its config path can be supplied with

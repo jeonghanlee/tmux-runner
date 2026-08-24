@@ -233,7 +233,7 @@ function require_dependencies {
     local -a dependencies=(
         bash shellcheck tmux script timeout setsid make install cmp stat find sort
         awk grep sed tr env mkdir chmod rm mkfifo mktemp tee tail sleep
-        hostname git sha256sum date cp ln
+        hostname git sha256sum date cp ln mv
     )
 
     for dependency in "${dependencies[@]}"; do
@@ -1331,6 +1331,139 @@ function selection_number {
         "$file" | tr -d '\r'
 }
 
+function repository_selection_number {
+    local file="$1"
+    local repository_path="$2"
+
+    tr -d '\r' < "$file" | awk -v path="$repository_path" \
+        '$1 ~ /^[0-9]+$/ && index($0, "  " path) > 0 { print $1; exit }'
+}
+
+function repository_rows {
+    local file="$1"
+
+    tr -d '\r' < "$file" | awk '$1 ~ /^[0-9]+$/ { print }'
+}
+
+function assert_repository_row_count {
+    local file="$1"
+    local repository_path="$2"
+    local expected_count="$3"
+    local count=0
+
+    count=$(repository_rows "$file" | \
+        awk -v path="$repository_path" \
+            'index($0, "  " path) > 0 { count++ } END { print count + 0 }')
+    assert_equal "$expected_count" "$count" \
+        "repository row count is wrong for $repository_path"
+}
+
+function run_repo_selection_success {
+    local label="$1"
+    local root="$2"
+    local home="$3"
+    local xdg_home="$4"
+    local expected_session="$5"
+    local repository_path="$6"
+    local number=""
+
+    start_runner_outside "$label" "$root" "$home" "$xdg_home" \
+        "$RUNNER" repo
+    if ! wait_for_transcript_text "Select repository:"; then
+        fail_test "$label did not display the repository prompt"
+    fi
+    number=$(repository_selection_number "$LAST_TRANSCRIPT" "$repository_path")
+    if [[ -z "$number" ]]; then
+        fail_test "$label did not display the selected repository"
+    fi
+    send_current_input "$number\n"
+    if ! wait_for_client_session "$root" "$expected_session"; then
+        fail_test "$label did not reach $expected_session"
+    fi
+    detach_current_client
+    finish_current_pty
+    assert_last_pty_succeeded "$label failed"
+}
+
+function run_concurrent_repo_selection {
+    local label="$1"
+    local root="$2"
+    local home="$3"
+    local xdg_home="$4"
+    local repository_path="$5"
+    local expected_session="$6"
+    local fifo_one="$WORKSPACE/pty/$label-one.fifo"
+    local fifo_two="$WORKSPACE/pty/$label-two.fifo"
+    local transcript_one="$WORKSPACE/pty/$label-one.typescript"
+    local transcript_two="$WORKSPACE/pty/$label-two.typescript"
+    local console_one="$WORKSPACE/pty/$label-one.console"
+    local console_two="$WORKSPACE/pty/$label-two.console"
+    local command_string=""
+    local fd_one=""
+    local fd_two=""
+    local pid_one=""
+    local pid_two=""
+    local number_one=""
+    local number_two=""
+    local rc_one=0
+    local rc_two=0
+
+    mkfifo -- "$fifo_one" "$fifo_two"
+    printf -v command_string '%q ' bash -x "$RUNNER" repo
+    command_string="${command_string% }"
+
+    setsid env -u TMUX HOME="$home" XDG_CONFIG_HOME="$xdg_home" \
+        TMUX_TMPDIR="$root" SHELL=/bin/bash \
+        timeout --foreground -k 2s "${PTY_TIMEOUT_SECONDS}s" \
+        script -q -e -f -c "$command_string" "$transcript_one" \
+        < "$fifo_one" > "$console_one" 2>&1 &
+    pid_one=$!
+    record_manifest pid "$pid_one"
+    EXTRA_PTY_PIDS+=("$pid_one")
+    exec {fd_one}>"$fifo_one"
+    EXTRA_PTY_FDS+=("$fd_one")
+
+    setsid env -u TMUX HOME="$home" XDG_CONFIG_HOME="$xdg_home" \
+        TMUX_TMPDIR="$root" SHELL=/bin/bash \
+        timeout --foreground -k 2s "${PTY_TIMEOUT_SECONDS}s" \
+        script -q -e -f -c "$command_string" "$transcript_two" \
+        < "$fifo_two" > "$console_two" 2>&1 &
+    pid_two=$!
+    record_manifest pid "$pid_two"
+    EXTRA_PTY_PIDS+=("$pid_two")
+    exec {fd_two}>"$fifo_two"
+    EXTRA_PTY_FDS+=("$fd_two")
+
+    if ! wait_for_file_text "$transcript_one" "Select repository:" || \
+        ! wait_for_file_text "$transcript_two" "Select repository:"; then
+        fail_test "$label selectors did not display both prompts"
+    fi
+    number_one=$(repository_selection_number "$transcript_one" \
+        "$repository_path")
+    number_two=$(repository_selection_number "$transcript_two" \
+        "$repository_path")
+    if [[ -z "$number_one" ]] || [[ -z "$number_two" ]]; then
+        fail_test "$label selectors did not display the repository"
+    fi
+    printf '%s\n' "$number_one" >&"$fd_one"
+    printf '%s\n' "$number_two" >&"$fd_two"
+    if ! wait_for_client_count "$root" "$expected_session" 2; then
+        fail_test "$label did not attach both selectors"
+    fi
+    run_tmux "$root" detach-client -s "=$expected_session"
+    exec {fd_one}>&-
+    exec {fd_two}>&-
+    wait "$pid_one" || rc_one=$?
+    wait "$pid_two" || rc_two=$?
+    EXTRA_PTY_PIDS=()
+    EXTRA_PTY_FDS=()
+    assert_equal "0" "$rc_one" "$label first selector failed"
+    assert_equal "0" "$rc_two" "$label second selector failed"
+    assert_equal "1" \
+        "$(session_name_for_path "$root" "$repository_path" | grep -c .)" \
+        "$label created more than one session for one repository"
+}
+
 function assert_rows_visible {
     local file="$1"
     local rows="$2"
@@ -1768,7 +1901,7 @@ function test_t5_completion {
     COMP_CWORD=1
     _tmux_runner
     assert_reply_set "command completion set is wrong" \
-        create c ls attach a -V --version -h --help
+        create c repo ls attach a -V --version -h --help
 
     COMP_WORDS=(tmux-runner create -)
     COMP_CWORD=2
@@ -1782,6 +1915,10 @@ function test_t5_completion {
     COMP_CWORD=2
     _tmux_runner
     assert_reply_set "ls option completion set is wrong" -h --help
+    COMP_WORDS=(tmux-runner repo -)
+    COMP_CWORD=2
+    _tmux_runner
+    assert_reply_set "repo option completion set is wrong" -h --help
     COMP_WORDS=(tmux-runner attach -)
     COMP_CWORD=2
     _tmux_runner
@@ -2073,6 +2210,8 @@ function test_t8_help {
     run_help_case create-long "Usage: tmux-runner create" create --help
     run_help_case c-short "Usage: tmux-runner c" c -h
     run_help_case c-long "Usage: tmux-runner c" c --help
+    run_help_case repo-short "Usage: tmux-runner repo" repo -h
+    run_help_case repo-long "Usage: tmux-runner repo" repo --help
     run_help_case list-short "Usage: tmux-runner ls" ls -h
     run_help_case list-long "Usage: tmux-runner ls" ls --help
     run_help_case attach-short "Usage: tmux-runner attach" attach -h
@@ -2082,6 +2221,8 @@ function test_t8_help {
 
     assert_contains "$WORKSPACE/t8/top-long.stdout" "create, c" \
         "top-level help omitted the create command summary"
+    assert_contains "$WORKSPACE/t8/top-long.stdout" "repo" \
+        "top-level help omitted the repo command summary"
     assert_contains "$WORKSPACE/t8/top-long.stdout" "attach, a" \
         "top-level help omitted the attach command summary"
     assert_contains "$WORKSPACE/t8/top-long.stdout" "-V, --version" \
@@ -2754,6 +2895,409 @@ function test_m4_t5_regression_integration {
     pass_test M4-T5 "M1-M4 command, install, server, and identity integration"
 }
 
+function test_m5_t1_repository_configuration {
+    local root=""
+    local home="$WORKSPACE/m5-t1/home"
+    local xdg_home="$WORKSPACE/m5-t1/xdg"
+    local repos_file="$xdg_home/tmux-runner/repos"
+    local literal_root="$WORKSPACE/m5-t1/catalog \$value *"
+    local repository="$literal_root/repository with space"
+    local command_root=""
+    local command_repository=""
+    local alias_root="$WORKSPACE/m5-t1/catalog-alias"
+    local missing_root="$WORKSPACE/m5-t1/missing-root"
+    local unreadable_root="$WORKSPACE/m5-t1/unreadable-root"
+    local sentinel="$WORKSPACE/m5-t1/shell-evaluated"
+    local fingerprint_before=""
+
+    create_tmux_root m5-t1
+    root="$NEW_TMUX_ROOT"
+    mkdir -p -- "$home" "$xdg_home" "$literal_root" "$unreadable_root"
+    run_tmux "$root" -f /dev/null new-session -d -s configuration-sentinel
+    fingerprint_before=$(server_fingerprint "$root")
+
+    run_outside_failure m5-t1-missing "$root" "$home" "$xdg_home" \
+        "$RUNNER" repo
+    assert_contains "$LAST_TRANSCRIPT" "$repos_file" \
+        "missing repos guidance omitted the expected path"
+    assert_contains "$LAST_TRANSCRIPT" \
+        "Add one literal absolute search root per line." \
+        "missing repos guidance omitted the setup form"
+
+    mkdir -p -- "${repos_file%/*}"
+    : > "$repos_file"
+    run_outside_failure m5-t1-empty "$root" "$home" "$xdg_home" \
+        "$RUNNER" repo
+    assert_contains "$LAST_TRANSCRIPT" "has no usable roots" \
+        "empty repos file omitted its error"
+
+    init_git_repository "$repository"
+    command_root="$WORKSPACE/m5-t1/catalog \$(touch\${IFS}\$M5_SENTINEL)"
+    command_repository="$command_root/command repository"
+    init_git_repository "$command_repository"
+    ln -s -- "$literal_root" "$alias_root"
+    chmod 000 "$unreadable_root"
+    {
+        printf '\n'
+        printf '   # ignored comment\n'
+        printf '%s\n' "$literal_root"
+        printf '%s\n' "$command_root"
+        printf '%s\n' "$alias_root"
+        printf '%s\n' "$literal_root"
+        printf '%s\n' "$missing_root"
+        printf '%s\n' "$unreadable_root"
+        # The config must retain this literal tilde.
+        # shellcheck disable=SC2088
+        printf '%s\n' '~/not-expanded'
+        printf '$%s\n' "(touch $sentinel)"
+    } > "$repos_file"
+
+    export M5_SENTINEL="$sentinel"
+    start_state_monitor m5-t1-literal "$root"
+    start_runner_outside m5-t1-literal "$root" "$home" "$xdg_home" \
+        "$RUNNER" repo
+    if ! wait_for_transcript_text "Select repository:"; then
+        fail_test "literal repository config did not reach its prompt"
+    fi
+    assert_repository_row_count "$LAST_TRANSCRIPT" "$repository" 1
+    assert_repository_row_count "$LAST_TRANSCRIPT" "$command_repository" 1
+    assert_contains "$LAST_TRANSCRIPT" \
+        "repository root is missing: $missing_root" \
+        "missing root warning was not displayed"
+    assert_contains "$LAST_TRANSCRIPT" \
+        "repository root is not accessible: $unreadable_root" \
+        "unreadable root warning was not displayed"
+    assert_contains "$LAST_TRANSCRIPT" \
+        "repository root is not absolute: ~/not-expanded" \
+        "tilde root was expanded or accepted"
+    if [[ -e "$sentinel" ]]; then
+        fail_test "repository config executed command substitution text"
+    fi
+    send_current_input 'not-a-number\n'
+    finish_current_pty
+    stop_state_monitor m5-t1-literal
+    unset M5_SENTINEL
+    chmod 0700 "$unreadable_root"
+    assert_last_pty_failed_without_timeout \
+        "literal repository config invalid selection"
+    assert_equal "$fingerprint_before" "$(server_fingerprint "$root")" \
+        "repository configuration failures changed tmux state"
+    pass_test M5-T1 "literal repository roots and no-state failure handling"
+}
+
+function test_m5_t2_repository_discovery {
+    local root=""
+    local home="$WORKSPACE/m5-t2/home"
+    local xdg_home="$WORKSPACE/m5-t2/xdg"
+    local repos_file="$xdg_home/tmux-runner/repos"
+    local root_repo="$WORKSPACE/m5-t2/root-repo"
+    local scan_root="$WORKSPACE/m5-t2/scan-root"
+    local nested_repo="$scan_root/outer/nested-repo"
+    local source_repo="$scan_root/source-repo"
+    local linked_repo="$scan_root/linked-repo"
+    local bare_repo="$scan_root/bare-repo.git"
+    local ordinary_dir="$scan_root/ordinary-directory"
+    local shared_one="$scan_root/team-a/shared"
+    local shared_two="$scan_root/team-b/shared"
+    local norm_one="$scan_root/hash/alpha.dot/norm"
+    local norm_two="$scan_root/hash/alpha:dot/norm"
+    local unreadable_subtree="$scan_root/unreadable-subtree"
+    local hidden_repo="$unreadable_subtree/hidden-repo"
+    local alias_root="$WORKSPACE/m5-t2/scan-alias"
+    local rows_one=""
+    local rows_two=""
+    local stem_one=""
+    local stem_two=""
+    local hash_output=""
+    local hash_one=""
+    local hash_two=""
+
+    create_tmux_root m5-t2
+    root="$NEW_TMUX_ROOT"
+    mkdir -p -- "$home" "${repos_file%/*}" "$scan_root" "$ordinary_dir"
+    init_git_repository "$root_repo"
+    init_git_repository "$nested_repo"
+    init_git_repository "$source_repo"
+    git -C "$source_repo" worktree add -q -b linked-catalog "$linked_repo"
+    git init -q --bare "$bare_repo"
+    init_git_repository "$shared_one"
+    init_git_repository "$shared_two"
+    init_git_repository "$norm_one"
+    init_git_repository "$norm_two"
+    init_git_repository "$hidden_repo"
+    chmod 000 "$unreadable_subtree"
+    ln -s -- "$scan_root" "$alias_root"
+    ln -s -- "$scan_root" "$scan_root/loop"
+    {
+        printf '%s\n' "$root_repo"
+        printf '%s\n' "$scan_root"
+        printf '%s\n' "$scan_root/outer"
+        printf '%s\n' "$alias_root"
+    } > "$repos_file"
+    run_tmux "$root" -f /dev/null new-session -d -s discovery-sentinel
+
+    start_state_monitor m5-t2-first "$root"
+    start_runner_outside m5-t2-first "$root" "$home" "$xdg_home" \
+        "$RUNNER" repo
+    if ! wait_for_transcript_text "Select repository:"; then
+        fail_test "first repository discovery did not reach its prompt"
+    fi
+    rows_one=$(repository_rows "$LAST_TRANSCRIPT")
+    assert_repository_row_count "$LAST_TRANSCRIPT" "$root_repo" 1
+    assert_repository_row_count "$LAST_TRANSCRIPT" "$nested_repo" 1
+    assert_repository_row_count "$LAST_TRANSCRIPT" "$source_repo" 1
+    assert_repository_row_count "$LAST_TRANSCRIPT" "$linked_repo" 1
+    assert_repository_row_count "$LAST_TRANSCRIPT" "$shared_one" 1
+    assert_repository_row_count "$LAST_TRANSCRIPT" "$shared_two" 1
+    assert_repository_row_count "$LAST_TRANSCRIPT" "$norm_one" 1
+    assert_repository_row_count "$LAST_TRANSCRIPT" "$norm_two" 1
+    assert_repository_row_count "$LAST_TRANSCRIPT" "$hidden_repo" 0
+    assert_repository_row_count "$LAST_TRANSCRIPT" "$bare_repo" 0
+    assert_repository_row_count "$LAST_TRANSCRIPT" "$ordinary_dir" 0
+    assert_contains "$LAST_TRANSCRIPT" "team-a-shared  $shared_one" \
+        "first duplicate repository label is not minimum-parent"
+    assert_contains "$LAST_TRANSCRIPT" "team-b-shared  $shared_two" \
+        "second duplicate repository label is not minimum-parent"
+    assert_contains "$LAST_TRANSCRIPT" "$unreadable_subtree" \
+        "unreadable child warning omitted its path"
+
+    stem_one="${norm_one#/}"
+    stem_one="${stem_one//\//-}"
+    stem_one="${stem_one//./_}"
+    stem_one="${stem_one//:/_}"
+    stem_two="${norm_two#/}"
+    stem_two="${stem_two//\//-}"
+    stem_two="${stem_two//./_}"
+    stem_two="${stem_two//:/_}"
+    hash_output=$(printf '%s' "$norm_one" | sha256sum)
+    hash_one="${hash_output%% *}"
+    hash_output=$(printf '%s' "$norm_two" | sha256sum)
+    hash_two="${hash_output%% *}"
+    assert_contains "$LAST_TRANSCRIPT" \
+        "${stem_one}-${hash_one:0:12}  $norm_one" \
+        "first normalized catalog collision omitted its path hash"
+    assert_contains "$LAST_TRANSCRIPT" \
+        "${stem_two}-${hash_two:0:12}  $norm_two" \
+        "second normalized catalog collision omitted its path hash"
+    send_current_input 'x\n'
+    finish_current_pty
+    stop_state_monitor m5-t2-first
+    assert_last_pty_failed_without_timeout "first catalog inspection"
+
+    start_state_monitor m5-t2-second "$root"
+    start_runner_outside m5-t2-second "$root" "$home" "$xdg_home" \
+        "$RUNNER" repo
+    if ! wait_for_transcript_text "Select repository:"; then
+        fail_test "second repository discovery did not reach its prompt"
+    fi
+    rows_two=$(repository_rows "$LAST_TRANSCRIPT")
+    assert_equal "$rows_one" "$rows_two" \
+        "repository catalog ordering changed between runs"
+    send_current_input 'x\n'
+    finish_current_pty
+    stop_state_monitor m5-t2-second
+    chmod 0700 "$unreadable_subtree"
+    assert_last_pty_failed_without_timeout "second catalog inspection"
+    pass_test M5-T2 "real Git discovery, deduplication, and stable labels"
+}
+
+function test_m5_t3_repository_selection {
+    local root=""
+    local opposite_root=""
+    local home="$WORKSPACE/m5-t3/home"
+    local xdg_home="$WORKSPACE/m5-t3/xdg"
+    local repos_file="$xdg_home/tmux-runner/repos"
+    local catalog_root="$WORKSPACE/m5-t3/catalog"
+    local left_repo="$catalog_root/left/shared"
+    local right_repo="$catalog_root/right/shared"
+    local concurrent_repo="$catalog_root/concurrent"
+    local legacy_repo="$catalog_root/legacy"
+    local short_hostname=""
+    local left_name=""
+    local right_name=""
+    local concurrent_name=""
+    local identity_before=""
+
+    create_tmux_root m5-t3
+    root="$NEW_TMUX_ROOT"
+    mkdir -p -- "$home" "${repos_file%/*}" "$catalog_root"
+    init_git_repository "$left_repo"
+    init_git_repository "$right_repo"
+    init_git_repository "$concurrent_repo"
+    init_git_repository "$legacy_repo"
+    printf '%s\n' "$catalog_root" > "$repos_file"
+    short_hostname=$(hostname -s)
+    short_hostname="${short_hostname//./_}"
+    short_hostname="${short_hostname//:/_}"
+    left_name="left-shared-$short_hostname"
+    right_name="right-shared-$short_hostname"
+    concurrent_name="concurrent-$short_hostname"
+
+    run_outside_success m5-t3-create-catalog "$root" "$home" "$xdg_home" \
+        "$RUNNER" "$right_name" create -c "$right_repo"
+    assert_equal "$right_repo" "$(session_path "$root" "$right_name")" \
+        "catalogued create did not use the stable catalog label"
+
+    run_repo_selection_success m5-t3-left-first "$root" "$home" \
+        "$xdg_home" "$left_name" "$left_repo"
+    identity_before=$(session_identity "$root" "$left_name")
+    run_repo_selection_success m5-t3-left-reuse "$root" "$home" \
+        "$xdg_home" "$left_name" "$left_repo"
+    assert_equal "$identity_before" "$(session_identity "$root" "$left_name")" \
+        "repository reselection did not reuse its session"
+
+    run_concurrent_repo_selection m5-t3-concurrent "$root" "$home" \
+        "$xdg_home" "$concurrent_repo" "$concurrent_name"
+    assert_equal "$concurrent_repo" \
+        "$(session_path "$root" "$concurrent_name")" \
+        "concurrent selectors recorded the wrong path"
+
+    run_outside_success m5-t3-legacy-create "$root" "$home" "$xdg_home" \
+        "$RUNNER" legacy-explicit create -s legacy-explicit -c "$legacy_repo"
+    run_repo_selection_success m5-t3-legacy-select "$root" "$home" \
+        "$xdg_home" legacy-explicit "$legacy_repo"
+    if run_tmux "$root" has-session -t "=legacy-$short_hostname" \
+        2>/dev/null; then
+        fail_test "repository selection renamed an existing path session"
+    fi
+
+    create_tmux_root m5-t3-opposite
+    opposite_root="$NEW_TMUX_ROOT"
+    run_repo_selection_success m5-t3-opposite-left "$opposite_root" \
+        "$home" "$xdg_home" "$left_name" "$left_repo"
+    run_repo_selection_success m5-t3-opposite-right "$opposite_root" \
+        "$home" "$xdg_home" "$right_name" "$right_repo"
+    assert_equal "$left_repo" \
+        "$(session_path "$opposite_root" "$left_name")" \
+        "opposite selection order changed the left catalog identity"
+    assert_equal "$right_repo" \
+        "$(session_path "$opposite_root" "$right_name")" \
+        "opposite selection order changed the right catalog identity"
+    pass_test M5-T3 "catalogued create, reuse, concurrency, and legacy reuse"
+}
+
+function test_m5_t4_repository_failures {
+    local root=""
+    local home="$WORKSPACE/m5-t4/home"
+    local xdg_home="$WORKSPACE/m5-t4/xdg"
+    local empty_xdg="$WORKSPACE/m5-t4/empty-xdg"
+    local repos_file="$xdg_home/tmux-runner/repos"
+    local empty_repos="$empty_xdg/tmux-runner/repos"
+    local catalog_root="$WORKSPACE/m5-t4/catalog"
+    local repository="$catalog_root/project"
+    local moved_repository="$catalog_root/project.removed"
+    local plain_root="$WORKSPACE/m5-t4/plain-root"
+    local number=""
+
+    create_tmux_root m5-t4
+    root="$NEW_TMUX_ROOT"
+    mkdir -p -- "$home" "${repos_file%/*}" "${empty_repos%/*}" \
+        "$catalog_root" "$plain_root"
+    init_git_repository "$repository"
+    printf '%s\n' "$catalog_root" > "$repos_file"
+    printf '%s\n' "$plain_root" > "$empty_repos"
+    run_tmux "$root" -f /dev/null new-session -d -s failure-sentinel
+
+    start_state_monitor m5-t4-text "$root"
+    start_runner_outside m5-t4-text "$root" "$home" "$xdg_home" \
+        "$RUNNER" repo
+    wait_for_transcript_text "Select repository:" || \
+        fail_test "nonnumeric repository case omitted its prompt"
+    send_current_input 'not-a-number\n'
+    finish_current_pty
+    stop_state_monitor m5-t4-text
+    assert_last_pty_failed_without_timeout "nonnumeric repository selection"
+
+    start_state_monitor m5-t4-range "$root"
+    start_runner_outside m5-t4-range "$root" "$home" "$xdg_home" \
+        "$RUNNER" repo
+    wait_for_transcript_text "Select repository:" || \
+        fail_test "range repository case omitted its prompt"
+    send_current_input '18446744073709551617\n'
+    finish_current_pty
+    stop_state_monitor m5-t4-range
+    assert_last_pty_failed_without_timeout "range repository selection"
+
+    run_outside_failure m5-t4-empty "$root" "$home" "$empty_xdg" \
+        "$RUNNER" repo
+    assert_contains "$LAST_TRANSCRIPT" "no Git working trees found" \
+        "empty repository discovery omitted its error"
+
+    start_state_monitor m5-t4-removed "$root"
+    start_runner_outside m5-t4-removed "$root" "$home" "$xdg_home" \
+        "$RUNNER" repo
+    wait_for_transcript_text "Select repository:" || \
+        fail_test "removed repository case omitted its prompt"
+    number=$(repository_selection_number "$LAST_TRANSCRIPT" "$repository")
+    mv -- "$repository" "$moved_repository"
+    send_current_input "$number\n"
+    finish_current_pty
+    mv -- "$moved_repository" "$repository"
+    stop_state_monitor m5-t4-removed
+    assert_last_pty_failed_without_timeout "removed repository selection"
+    assert_contains "$LAST_TRANSCRIPT" "no longer accessible" \
+        "removed repository error omitted revalidation guidance"
+
+    start_state_monitor m5-t4-changed "$root"
+    start_runner_outside m5-t4-changed "$root" "$home" "$xdg_home" \
+        "$RUNNER" repo
+    wait_for_transcript_text "Select repository:" || \
+        fail_test "changed repository case omitted its prompt"
+    number=$(repository_selection_number "$LAST_TRANSCRIPT" "$repository")
+    mv -- "$repository/.git" "$repository/.git.removed"
+    send_current_input "$number\n"
+    finish_current_pty
+    mv -- "$repository/.git.removed" "$repository/.git"
+    stop_state_monitor m5-t4-changed
+    assert_last_pty_failed_without_timeout "changed repository selection"
+    assert_contains "$LAST_TRANSCRIPT" "no longer a Git working tree" \
+        "changed repository error omitted revalidation guidance"
+
+    run_outside_success m5-t4-explicit-one "$root" "$home" "$xdg_home" \
+        "$RUNNER" repo-explicit-one create -s repo-explicit-one \
+        -c "$repository"
+    run_outside_success m5-t4-explicit-two "$root" "$home" "$xdg_home" \
+        "$RUNNER" repo-explicit-two create -s repo-explicit-two \
+        -c "$repository"
+    start_state_monitor m5-t4-ambiguous "$root"
+    start_runner_outside m5-t4-ambiguous "$root" "$home" "$xdg_home" \
+        "$RUNNER" repo
+    wait_for_transcript_text "Select repository:" || \
+        fail_test "ambiguous repository case omitted its prompt"
+    number=$(repository_selection_number "$LAST_TRANSCRIPT" "$repository")
+    send_current_input "$number\n"
+    finish_current_pty
+    stop_state_monitor m5-t4-ambiguous
+    assert_last_pty_failed_without_timeout "ambiguous repository selection"
+    assert_contains "$LAST_TRANSCRIPT" "repo-explicit-one" \
+        "ambiguous repository error omitted the first exact name"
+    assert_contains "$LAST_TRANSCRIPT" "repo-explicit-two" \
+        "ambiguous repository error omitted the second exact name"
+    pass_test M5-T4 "invalid, empty, stale, changed, and ambiguous failures"
+}
+
+function test_m5_t5_interface_regression {
+    local installed_runner="$WORKSPACE/t6/home with space/.local/bin/tmux-runner"
+    local installed_help="$WORKSPACE/m5-t5-installed-help"
+
+    assert_contains "$WORKSPACE/t8/top-long.stdout" "repo" \
+        "top-level help omits repository discovery"
+    assert_contains "$WORKSPACE/t8/repo-long.stdout" \
+        "Add one literal absolute search root per line." \
+        "repo help omits literal configuration guidance"
+    env PATH=/nonexistent /bin/bash "$installed_runner" repo --help \
+        > "$installed_help"
+    assert_contains "$installed_help" "Usage: tmux-runner repo" \
+        "installed runner omits repo help"
+    assert_contains "$README" "## Repository Catalog" \
+        "README omits repository catalog behavior"
+    assert_contains "$README" "tmux-runner repo" \
+        "README omits the repository selector command"
+    assert_contains "$README" "literal absolute" \
+        "README omits literal repository root parsing"
+    pass_test M5-T5 "help, completion, installation, docs, and M1-M4 regression"
+}
+
 function assert_manifest_processes_stopped {
     local manifest="$1"
     local process_id=""
@@ -2903,6 +3447,11 @@ function main {
     test_m4_t3_worktree_identity
     test_m4_t4_directory_and_explicit_identity
     test_m4_t5_regression_integration
+    test_m5_t1_repository_configuration
+    test_m5_t2_repository_discovery
+    test_m5_t3_repository_selection
+    test_m5_t4_repository_failures
+    test_m5_t5_interface_regression
     printf 'PASS: %d milestone checks completed\n' "$TESTS_PASSED"
 }
 

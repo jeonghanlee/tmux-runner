@@ -17,7 +17,7 @@ Canonical branch or ref: master
 Git upstream: origin/master
 Remote tracker: none
 
-Next session entry point: implement M5 against the accepted plan in this
+Next session entry point: implement M6 against the accepted plan in this
 document.
 
 ## Milestone
@@ -29,12 +29,12 @@ document.
 | Core | M1 | Deliver the local tmux runner | Milestone | Complete | No | D1, D2, D3, D4, D5, D6, D7, D8, D9, D10 | Complete 2026-08-20, correction commit `ede2b62`; corrected T1-T8, third-person review, and final second-person reader pass accepted; [detail](#m1---deliver-the-local-tmux-runner) |
 | Version | M2 | Add source and installed version identity | Milestone | Complete | No | M1, D11, D12 | Complete 2026-08-23, carrying commit `88d20a4`; M2 / T1-T5, shipped suite T1-T9, and the stage review cycle accepted; [detail](#m2---add-source-and-installed-version-identity) |
 | Server | M3 | Isolate the runner server and local tmux configuration | Milestone | Complete | No | M2, D13, D14, D17 | Complete 2026-08-24, carrying commit `89095fb`; M3 / T1-T5 and both requested reviews accepted; [detail](#m3---isolate-the-runner-server-and-local-tmux-configuration) |
-| Identity | M4 | Resolve repository and working-directory identity | Milestone | Complete | No | M3, D16 | Complete 2026-08-24; M4 / T1-T5 and both requested reviews accepted; [detail](#m4---resolve-repository-and-working-directory-identity) |
-| Discovery | M5 | Discover configured repositories and select one | Milestone | Not started | No | M4, D15, D17 | Starts after M4; [detail](#m5---discover-configured-repositories-and-select-one) |
-| Navigation | M6 | Add recent and previous-session navigation | Milestone | Not started | No | M5, D18 | Starts after M5; [detail](#m6---add-recent-and-previous-session-navigation) |
+| Identity | M4 | Resolve repository and working-directory identity | Milestone | Complete | No | M3, D16 | Complete 2026-08-24, carrying commit `8caaea1`; M4 / T1-T5 and both requested reviews accepted; [detail](#m4---resolve-repository-and-working-directory-identity) |
+| Discovery | M5 | Discover configured repositories and select one | Milestone | Complete | No | M4, D15, D17 | Complete 2026-08-24; M5 / T1-T5 and both requested reviews accepted; [detail](#m5---discover-configured-repositories-and-select-one) |
+| Navigation | M6 | Add recent and previous-session navigation | Milestone | Not started | Yes | M5, D18 | Ready after M5; [detail](#m6---add-recent-and-previous-session-navigation) |
 | Integration | M7 | Complete integrated verification and release preparation | Milestone | Not started | No | M3, M4, M5, M6, D17 | Starts after M3-M6; [detail](#m7---complete-integrated-verification-and-release-preparation) |
 
-Milestone tally: Complete 4, In progress 0, Not started 3.
+Milestone tally: Complete 5, In progress 0, Not started 2.
 
 ### Decisions
 
@@ -519,14 +519,14 @@ Superseded Plan Artifacts: none
 - The 2026-08-24 second-person review and follow-up accepted M4 after aligning
   collision and path-reuse help, command-specific requirements, and this
   review-state record.
-- The carrying commit is pending.
+- Carrying commit: `8caaea1`.
 
 #### M5 - Discover configured repositories and select one
 
 Origin: a158012 / M5
 Identity History: none
 GitHub Issue: none
-Status: Not started
+Status: Complete
 
 ##### Summary
 
@@ -628,15 +628,22 @@ Superseded Plan Artifacts: none
 
 | Label | Observed At | Environment | Result | Evidence |
 | --- | --- | --- | --- | --- |
-| T1 | Pending | Pending | Pending | Implementation has not started. |
-| T2 | Pending | Pending | Pending | Implementation has not started. |
-| T3 | Pending | Pending | Pending | Implementation has not started. |
-| T4 | Pending | Pending | Pending | Implementation has not started. |
-| T5 | Pending | Pending | Pending | Implementation has not started. |
+| T1 | 2026-08-24 | Real Bash, XDG paths, filesystem, and dedicated tmux server | Pass | Literal paths, spaces, comments, duplicate, missing, unreadable, and shell-like roots were exercised; failures preserved tmux state. |
+| T2 | 2026-08-24 | Real Git repositories and linked worktrees under bounded PTYs | Pass | Root, nested, linked, bare, ordinary, overlapping, symbolic-link, loop, unreadable-child, and normalized-collision cases produced stable deduplicated rows. |
+| T3 | 2026-08-24 | Real named tmux servers, PTYs, FIFOs, and readiness barriers | Pass | Catalogued create, reuse, concurrent selection, legacy path reuse, and opposite selection orders on fresh servers preserved canonical identities. |
+| T4 | 2026-08-24 | Real filesystem mutation, Git, tmux state monitor, and bounded PTYs | Pass | Invalid, empty, removed, changed, and ambiguous selections failed without an unintended destination. |
+| T5 | 2026-08-24 | Source and installed shipped files | Pass | Help, completion, installation, documentation, server isolation, and M1-M4 regression checks passed. |
 
 ##### Closure Evidence
 
-- None; implementation has not started.
+- `bash tests/test-tmux-runner.bash`: 23 milestone checks and the outer
+  supervisor check passed through the shipped runner.
+- `bash -n`, ShellCheck, and `git diff --check` passed for all changed shell
+  and documentation paths.
+- The third-person review accepted the implementation after the full shipped
+  suite and static checks passed.
+- The second-person review accepted the setup and use path after the README
+  example was tied to an existing Git working tree.
 
 #### M6 - Add recent and previous-session navigation
 
