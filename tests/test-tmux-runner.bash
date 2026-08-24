@@ -17,10 +17,13 @@ readonly RUNNER="$REPO_ROOT/bin/tmux-runner"
 readonly COMPLETION="$REPO_ROOT/bin/tmux-runner-completion.bash"
 readonly VERSION_INJECTOR="$REPO_ROOT/configure/inject-runner-version.bash"
 readonly README="$REPO_ROOT/README.md"
+readonly RUNNER_CONFIG="$REPO_ROOT/config/tmux.conf"
+readonly RUNNER_SERVER_NAME="tmux-runner"
 readonly PTY_TIMEOUT_SECONDS=12
 readonly POLL_INTERVAL_SECONDS=0.05
 
 TMUX_PATH=""
+TMUX_RUNNER_TRACE_PREFIX=""
 WORKSPACE=""
 CURRENT_PTY_PID=""
 CURRENT_PTY_FD=""
@@ -68,11 +71,24 @@ function terminate_pty_process {
     wait "$pid" 2>/dev/null || true
 }
 
+function record_manifest {
+    local record_type="$1"
+    local record_value="$2"
+
+    if [[ -n "${TMUX_RUNNER_TEST_MANIFEST:-}" ]]; then
+        printf '%s\t%s\n' "$record_type" "$record_value" \
+            >> "$TMUX_RUNNER_TEST_MANIFEST"
+    fi
+}
+
 function cleanup {
+    local exit_status="${1:-0}"
     local root=""
     local cleanup_pid=""
     local extra_pid=""
     local extra_fd=""
+    local server_pid=""
+    local deadline=0
 
     set +e
     if [[ -n "$STATE_MONITOR_PID" ]]; then
@@ -93,16 +109,48 @@ function cleanup {
         terminate_pty_process "$extra_pid"
     done
     for root in "${TMUX_ROOTS[@]}"; do
+        server_pid=$(env -u TMUX TMUX_TMPDIR="$root" \
+            tmux -L "$RUNNER_SERVER_NAME" display-message -p '#{pid}' \
+            2>/dev/null || true)
+        if [[ "$server_pid" =~ ^[0-9]+$ ]]; then
+            record_manifest pid "$server_pid"
+        fi
+        env -u TMUX TMUX_TMPDIR="$root" tmux -L "$RUNNER_SERVER_NAME" \
+            kill-server >/dev/null 2>&1
+        if [[ "$server_pid" =~ ^[0-9]+$ ]]; then
+            deadline=$((SECONDS + 2))
+            while kill -0 "$server_pid" 2>/dev/null && \
+                (( SECONDS <= deadline )); do
+                sleep "$POLL_INTERVAL_SECONDS"
+            done
+        fi
+        rm -f -- "$root/tmux-$UID/$RUNNER_SERVER_NAME"
+        server_pid=$(env -u TMUX TMUX_TMPDIR="$root" \
+            tmux display-message -p '#{pid}' 2>/dev/null || true)
+        if [[ "$server_pid" =~ ^[0-9]+$ ]]; then
+            record_manifest pid "$server_pid"
+        fi
         env -u TMUX TMUX_TMPDIR="$root" tmux kill-server >/dev/null 2>&1
+        if [[ "$server_pid" =~ ^[0-9]+$ ]]; then
+            deadline=$((SECONDS + 2))
+            while kill -0 "$server_pid" 2>/dev/null && \
+                (( SECONDS <= deadline )); do
+                sleep "$POLL_INTERVAL_SECONDS"
+            done
+        fi
+        rm -f -- "$root/tmux-$UID/default"
     done
-    if [[ -n "$WORKSPACE" ]] && [[ -d "$WORKSPACE" ]] && \
+    if (( exit_status == 0 )) && [[ -n "$WORKSPACE" ]] && \
+        [[ -d "$WORKSPACE" ]] && \
         [[ "$WORKSPACE" == /tmp/tmux-runner-test.* ]]; then
         chmod -R u+w -- "$WORKSPACE" 2>/dev/null || true
         rm -rf -- "$WORKSPACE"
+    elif [[ -n "$WORKSPACE" ]] && [[ -d "$WORKSPACE" ]]; then
+        printf 'Diagnostic workspace: %s\n' "$WORKSPACE" >&2
     fi
 }
 
-trap cleanup EXIT
+trap 'cleanup "$?"' EXIT
 trap 'exit 130' INT
 trap 'exit 143' TERM
 
@@ -200,6 +248,7 @@ function require_dependencies {
         fi
     done
     TMUX_PATH=$(type -P tmux)
+    TMUX_RUNNER_TRACE_PREFIX="$TMUX_PATH -L $RUNNER_SERVER_NAME -f /dev/null"
 }
 
 function create_tmux_root {
@@ -209,9 +258,18 @@ function create_tmux_root {
     mkdir -p -- "$NEW_TMUX_ROOT"
     chmod 0700 "$NEW_TMUX_ROOT"
     TMUX_ROOTS+=("$NEW_TMUX_ROOT")
+    record_manifest root "$NEW_TMUX_ROOT"
 }
 
 function run_tmux {
+    local root="$1"
+
+    shift
+    env -u TMUX TMUX_TMPDIR="$root" \
+        tmux -L "$RUNNER_SERVER_NAME" "$@"
+}
+
+function run_default_tmux {
     local root="$1"
 
     shift
@@ -280,6 +338,7 @@ function start_pty_command {
         script -q -e -f -c "$command_string" "$LAST_TRANSCRIPT" \
         < "$LAST_FIFO" > "$LAST_CONSOLE" 2>&1 &
     CURRENT_PTY_PID=$!
+    record_manifest pid "$CURRENT_PTY_PID"
     exec {CURRENT_PTY_FD}>"$LAST_FIFO"
 }
 
@@ -399,6 +458,23 @@ function wait_for_client_session {
     return 1
 }
 
+function wait_for_default_client_session {
+    local root="$1"
+    local expected_session="$2"
+    local clients=""
+    local deadline=$((SECONDS + PTY_TIMEOUT_SECONDS))
+
+    while (( SECONDS <= deadline )); do
+        clients=$(run_default_tmux "$root" list-clients \
+            -F '#{client_session}' 2>/dev/null || true)
+        if grep -Fx -- "$expected_session" <<< "$clients" >/dev/null; then
+            return 0
+        fi
+        sleep "$POLL_INTERVAL_SECONDS"
+    done
+    return 1
+}
+
 function wait_for_client_count {
     local root="$1"
     local expected_session="$2"
@@ -438,6 +514,109 @@ function client_fingerprint {
     run_tmux "$root" list-clients \
         -F '#{client_pid}|#{client_tty}|#{client_session}' 2>/dev/null | \
         LC_ALL=C sort
+}
+
+function one_server_snapshot {
+    local root="$1"
+    local server_kind="$2"
+    local socket_name="default"
+    local socket_path=""
+    local panes=""
+    local clients=""
+    local pane_rc=0
+
+    if [[ "$server_kind" == "runner" ]]; then
+        socket_name="$RUNNER_SERVER_NAME"
+        panes=$(run_tmux "$root" list-panes -a \
+            -F '#{session_name}|#{session_id}|#{window_id}|#{pane_id}|#{pane_current_path}' \
+            2>/dev/null) || pane_rc=$?
+        clients=$(run_tmux "$root" list-clients \
+            -F '#{client_pid}|#{client_tty}|#{client_session}' \
+            2>/dev/null || true)
+    else
+        panes=$(run_default_tmux "$root" list-panes -a \
+            -F '#{session_name}|#{session_id}|#{window_id}|#{pane_id}|#{pane_current_path}' \
+            2>/dev/null) || pane_rc=$?
+        clients=$(run_default_tmux "$root" list-clients \
+            -F '#{client_pid}|#{client_tty}|#{client_session}' \
+            2>/dev/null || true)
+    fi
+    socket_path="$root/tmux-$UID/$socket_name"
+    if (( pane_rc != 0 )); then
+        printf '%s|absent|socket=%s\n' "$server_kind" \
+            "$([[ -S "$socket_path" ]] && printf present || printf absent)"
+        return 0
+    fi
+    printf '%s|present|socket=%s\n' "$server_kind" \
+        "$([[ -S "$socket_path" ]] && printf present || printf absent)"
+    printf '%s|panes|%s\n' "$server_kind" \
+        "$(printf '%s\n' "$panes" | LC_ALL=C sort)"
+    printf '%s|clients|%s\n' "$server_kind" \
+        "$(printf '%s\n' "$clients" | LC_ALL=C sort)"
+}
+
+function dual_server_snapshot {
+    local root="$1"
+
+    one_server_snapshot "$root" default
+    one_server_snapshot "$root" runner
+}
+
+function monitor_dual_state_until_stop {
+    local root="$1"
+    local expected="$2"
+    local stop_file="$3"
+    local report_file="$4"
+    local ready_file="$5"
+    local actual=""
+    local ready=0
+
+    while true; do
+        actual=$(dual_server_snapshot "$root")
+        if [[ "$actual" != "$expected" ]]; then
+            {
+                printf 'Expected dual-server snapshot:\n%s\n' "$expected"
+                printf 'Observed dual-server snapshot:\n%s\n' "$actual"
+            } > "$report_file"
+            if (( ! ready )); then
+                printf 'ready\n' > "$ready_file"
+            fi
+            return 0
+        fi
+        if (( ! ready )); then
+            printf 'ready\n' > "$ready_file"
+            ready=1
+        fi
+        if [[ -e "$stop_file" ]]; then
+            return 0
+        fi
+        sleep "$POLL_INTERVAL_SECONDS"
+    done
+}
+
+function start_dual_state_monitor {
+    local label="$1"
+    local root="$2"
+    local expected=""
+
+    if [[ -n "$STATE_MONITOR_PID" ]]; then
+        fail_test "a state monitor is already active"
+    fi
+    STATE_MONITOR_SEQUENCE=$((STATE_MONITOR_SEQUENCE + 1))
+    STATE_MONITOR_STOP="$WORKSPACE/pty/$label-state-$STATE_MONITOR_SEQUENCE.stop"
+    STATE_MONITOR_REPORT="$WORKSPACE/pty/$label-state-$STATE_MONITOR_SEQUENCE.report"
+    STATE_MONITOR_READY="$WORKSPACE/pty/$label-state-$STATE_MONITOR_SEQUENCE.ready"
+    rm -f -- "$STATE_MONITOR_STOP" "$STATE_MONITOR_READY"
+    : > "$STATE_MONITOR_REPORT"
+    expected=$(dual_server_snapshot "$root")
+    monitor_dual_state_until_stop "$root" "$expected" \
+        "$STATE_MONITOR_STOP" "$STATE_MONITOR_REPORT" \
+        "$STATE_MONITOR_READY" &
+    STATE_MONITOR_PID=$!
+    record_manifest pid "$STATE_MONITOR_PID"
+    if ! wait_for_file "$STATE_MONITOR_READY"; then
+        fail_test "$label dual-server monitor did not become ready"
+    fi
 }
 
 function monitor_state_until_stop {
@@ -519,6 +698,7 @@ function start_state_monitor {
         "$expected_clients" "$STATE_MONITOR_STOP" "$STATE_MONITOR_REPORT" \
         "$STATE_MONITOR_READY" &
     STATE_MONITOR_PID=$!
+    record_manifest pid "$STATE_MONITOR_PID"
     if ! wait_for_file "$STATE_MONITOR_READY"; then
         fail_test "$label state monitor did not become ready"
     fi
@@ -593,9 +773,11 @@ function run_outside_syntax_failure {
     shift 5
     run_outside_failure "$label" "$root" "$home" "$xdg_home" \
         "$runner" "$@"
-    assert_not_contains "$LAST_TRANSCRIPT" "$TMUX_PATH attach-session" \
+    assert_not_contains "$LAST_TRANSCRIPT" \
+        "$TMUX_RUNNER_TRACE_PREFIX attach-session" \
         "$label called attach-session"
-    assert_not_contains "$LAST_TRANSCRIPT" "$TMUX_PATH switch-client" \
+    assert_not_contains "$LAST_TRANSCRIPT" \
+        "$TMUX_RUNNER_TRACE_PREFIX switch-client" \
         "$label called switch-client"
 }
 
@@ -609,13 +791,17 @@ function run_outside_create_syntax_failure {
     shift 5
     run_outside_failure "$label" "$root" "$home" "$xdg_home" \
         "$runner" "$@"
-    assert_not_contains "$LAST_TRANSCRIPT" "$TMUX_PATH has-session" \
+    assert_not_contains "$LAST_TRANSCRIPT" \
+        "$TMUX_RUNNER_TRACE_PREFIX has-session" \
         "$label called has-session"
-    assert_not_contains "$LAST_TRANSCRIPT" "$TMUX_PATH new-session" \
+    assert_not_contains "$LAST_TRANSCRIPT" \
+        "$TMUX_RUNNER_TRACE_PREFIX new-session" \
         "$label called new-session"
-    assert_not_contains "$LAST_TRANSCRIPT" "$TMUX_PATH attach-session" \
+    assert_not_contains "$LAST_TRANSCRIPT" \
+        "$TMUX_RUNNER_TRACE_PREFIX attach-session" \
         "$label called attach-session"
-    assert_not_contains "$LAST_TRANSCRIPT" "$TMUX_PATH switch-client" \
+    assert_not_contains "$LAST_TRANSCRIPT" \
+        "$TMUX_RUNNER_TRACE_PREFIX switch-client" \
         "$label called switch-client"
 }
 
@@ -671,6 +857,7 @@ function run_concurrent_create {
         script -q -e -f -c "$command_one" "$transcript_one" \
         < "$fifo_one" > "$console_one" 2>&1 &
     pid_one=$!
+    record_manifest pid "$pid_one"
     EXTRA_PTY_PIDS+=("$pid_one")
     exec {fd_one}>"$fifo_one"
     EXTRA_PTY_FDS+=("$fd_one")
@@ -681,6 +868,7 @@ function run_concurrent_create {
         script -q -e -f -c "$command_two" "$transcript_two" \
         < "$fifo_two" > "$console_two" 2>&1 &
     pid_two=$!
+    record_manifest pid "$pid_two"
     EXTRA_PTY_PIDS+=("$pid_two")
     exec {fd_two}>"$fifo_two"
     EXTRA_PTY_FDS+=("$fd_two")
@@ -704,16 +892,16 @@ function run_concurrent_create {
     assert_equal "0" "$rc_one" "$label first runner failed"
     assert_equal "0" "$rc_two" "$label second runner failed"
     assert_contains "$transcript_one" \
-        "$TMUX_PATH attach-session -t =$session_name" \
+        "$TMUX_RUNNER_TRACE_PREFIX attach-session -t =$session_name" \
         "$label first runner did not attach exactly"
     assert_contains "$transcript_two" \
-        "$TMUX_PATH attach-session -t =$session_name" \
+        "$TMUX_RUNNER_TRACE_PREFIX attach-session -t =$session_name" \
         "$label second runner did not attach exactly"
     assert_contains "$transcript_one" \
-        "$TMUX_PATH new-session -d -s $session_name" \
+        "$TMUX_RUNNER_TRACE_PREFIX new-session -d -s $session_name" \
         "$label first runner did not attempt creation"
     assert_contains "$transcript_two" \
-        "$TMUX_PATH new-session -d -s $session_name" \
+        "$TMUX_RUNNER_TRACE_PREFIX new-session -d -s $session_name" \
         "$label second runner did not attempt creation"
     if grep -F -- '+ create_rc=1' "$transcript_one" >/dev/null; then
         recovery_trace="$transcript_one"
@@ -723,7 +911,8 @@ function run_concurrent_create {
         fail_test "$label did not exercise duplicate-create recovery"
     fi
     recheck_count=$(grep -Fc -- \
-        "$TMUX_PATH has-session -t =$session_name" "$recovery_trace") || true
+        "+ run_tmux_command has-session -t =$session_name" \
+        "$recovery_trace") || true
     if (( recheck_count < 2 )); then
         fail_test "$label loser did not recheck the exact session"
     fi
@@ -735,11 +924,31 @@ function start_source_client {
     local home="$3"
     local xdg_home="$4"
     local source_session="$5"
+    local config_file="$xdg_home/tmux-runner/tmux.conf"
+
+    if [[ ! -e "$config_file" ]]; then
+        config_file="/dev/null"
+    fi
 
     start_pty_command "$label-client" "$root" "$home" "$xdg_home" \
-        tmux attach-session -t "=$source_session"
+        tmux -L "$RUNNER_SERVER_NAME" -f "$config_file" \
+        attach-session -t "=$source_session"
     if ! wait_for_client_session "$root" "$source_session"; then
         fail_test "$label client did not attach to $source_session"
+    fi
+}
+
+function start_default_source_client {
+    local label="$1"
+    local root="$2"
+    local home="$3"
+    local xdg_home="$4"
+    local source_session="$5"
+
+    start_pty_command "$label-client" "$root" "$home" "$xdg_home" \
+        tmux -f /dev/null attach-session -t "=$source_session"
+    if ! wait_for_default_client_session "$root" "$source_session"; then
+        fail_test "$label client did not attach to default session $source_session"
     fi
 }
 
@@ -766,6 +975,32 @@ function invoke_runner_inside {
 
     run_tmux "$root" send-keys -t "$source_session:0.0" -l -- "$shell_command"
     run_tmux "$root" send-keys -t "$source_session:0.0" C-m
+}
+
+function invoke_runner_inside_default {
+    local label="$1"
+    local root="$2"
+    local home="$3"
+    local xdg_home="$4"
+    local source_session="$5"
+    local runner="$6"
+    local runner_command=""
+    local shell_command=""
+
+    shift 6
+    LAST_INSIDE_TRACE="$WORKSPACE/pty/$label.inside-trace"
+    LAST_INSIDE_STATUS="$WORKSPACE/pty/$label.inside-status"
+    printf -v runner_command '%q ' env HOME="$home" \
+        XDG_CONFIG_HOME="$xdg_home" TMUX_TMPDIR="$root" \
+        bash -x "$runner" "$@"
+    runner_command="${runner_command% }"
+    printf -v shell_command \
+        "set -o pipefail; %s 2>&1 | tee %q; runner_rc=\${PIPESTATUS[0]}; printf \"%%s\\\\n\" \"\$runner_rc\" > %q" \
+        "$runner_command" "$LAST_INSIDE_TRACE" "$LAST_INSIDE_STATUS"
+
+    run_default_tmux "$root" send-keys -t "$source_session:0.0" \
+        -l -- "$shell_command"
+    run_default_tmux "$root" send-keys -t "$source_session:0.0" C-m
 }
 
 function inside_runner_status {
@@ -844,9 +1079,11 @@ function run_inside_syntax_failure {
     shift 6
     run_inside_failure "$label" "$root" "$home" "$xdg_home" \
         "$source_session" "$runner" "$@"
-    assert_not_contains "$LAST_INSIDE_TRACE" "$TMUX_PATH attach-session" \
+    assert_not_contains "$LAST_INSIDE_TRACE" \
+        "$TMUX_RUNNER_TRACE_PREFIX attach-session" \
         "$label called attach-session"
-    assert_not_contains "$LAST_INSIDE_TRACE" "$TMUX_PATH switch-client" \
+    assert_not_contains "$LAST_INSIDE_TRACE" \
+        "$TMUX_RUNNER_TRACE_PREFIX switch-client" \
         "$label called switch-client"
 }
 
@@ -947,7 +1184,8 @@ function test_t2_create {
     pushd "$default_dir" >/dev/null
     start_runner_outside t2-default "$root" "$home" "$xdg_home" \
         "$RUNNER" create
-    if ! wait_for_transcript_text "$TMUX_PATH has-session -t =$default_name"; then
+    if ! wait_for_transcript_text \
+        "+ run_tmux_command has-session -t =$default_name"; then
         fail_test "cold create did not reach its first tmux lookup"
     fi
     if ! wait_for_client_session "$root" "$default_name"; then
@@ -963,14 +1201,15 @@ function test_t2_create {
     run_outside_success t2-alias-create "$root" "$home" "$xdg_home" \
         "$RUNNER" alias_session_blue c -s alias.session:blue -c "$alias_dir"
     assert_contains "$LAST_TRANSCRIPT" \
-        "$TMUX_PATH new-session -d -s alias_session_blue" \
+        "$TMUX_RUNNER_TRACE_PREFIX new-session -d -s alias_session_blue" \
         "alias create did not normalize the session name"
     identity_before=$(session_identity "$root" alias_session_blue)
     run_outside_success t2-alias-reuse "$root" "$home" "$xdg_home" \
         "$RUNNER" alias_session_blue create -s alias.session:blue -c "$alias_dir"
     assert_equal "$identity_before" "$(session_identity "$root" alias_session_blue)" \
         "existing session reuse changed its identifiers"
-    assert_not_contains "$LAST_TRANSCRIPT" "$TMUX_PATH new-session" \
+    assert_not_contains "$LAST_TRANSCRIPT" \
+        "$TMUX_RUNNER_TRACE_PREFIX new-session" \
         "existing session reuse created another session"
 
     pushd "$named_dir" >/dev/null
@@ -993,7 +1232,7 @@ function test_t2_create {
     run_inside_success t2-inside-new "$root" "$home" "$xdg_home" \
         source-create inside_new "$RUNNER" create -s inside.new -c "$inside_dir"
     assert_contains "$LAST_INSIDE_TRACE" \
-        "$TMUX_PATH switch-client -t =inside_new" \
+        "$TMUX_RUNNER_TRACE_PREFIX switch-client -t =inside_new" \
         "inside create did not use an exact switch target"
 
     identity_before=$(session_identity "$root" alias_session_blue)
@@ -1002,7 +1241,8 @@ function test_t2_create {
         -c "$alias_dir"
     assert_equal "$identity_before" "$(session_identity "$root" alias_session_blue)" \
         "inside reuse changed existing session identifiers"
-    assert_not_contains "$LAST_INSIDE_TRACE" "$TMUX_PATH new-session" \
+    assert_not_contains "$LAST_INSIDE_TRACE" \
+        "$TMUX_RUNNER_TRACE_PREFIX new-session" \
         "inside reuse created another session"
 
     run_concurrent_create t2-concurrent "$root" "$home" "$xdg_home" \
@@ -1039,8 +1279,8 @@ function test_t3_attach {
     local home=""
     local xdg_home=""
     local fingerprint_before=""
-    local standard_trace="$TMUX_PATH attach-session -t =target"
-    local switch_trace="$TMUX_PATH switch-client -t =target"
+    local standard_trace="$TMUX_RUNNER_TRACE_PREFIX attach-session -t =target"
+    local switch_trace="$TMUX_RUNNER_TRACE_PREFIX switch-client -t =target"
 
     create_tmux_root t3
     root="$NEW_TMUX_ROOT"
@@ -1085,12 +1325,12 @@ function test_t3_attach {
     run_outside_success t3-dotted-outside "$root" "$home" "$xdg_home" \
         "$RUNNER" dotted_target_blue attach dotted.target:blue
     assert_contains "$LAST_TRANSCRIPT" \
-        "$TMUX_PATH attach-session -t =dotted_target_blue" \
+        "$TMUX_RUNNER_TRACE_PREFIX attach-session -t =dotted_target_blue" \
         "outside attach did not normalize separators"
     run_inside_success t3-dotted-inside "$root" "$home" "$xdg_home" \
         source dotted_target_blue "$RUNNER" a -t dotted.target:blue
     assert_contains "$LAST_INSIDE_TRACE" \
-        "$TMUX_PATH switch-client -t =dotted_target_blue" \
+        "$TMUX_RUNNER_TRACE_PREFIX switch-client -t =dotted_target_blue" \
         "inside attach did not normalize separators"
 
     fingerprint_before=$(server_fingerprint "$root")
@@ -1150,12 +1390,12 @@ function test_t3_attach {
     run_outside_failure t3-prefix-missing-outside "$root" "$home" "$xdg_home" \
         "$RUNNER" attach prefix-only
     assert_contains "$LAST_TRANSCRIPT" \
-        "$TMUX_PATH attach-session -t =prefix-only" \
+        "$TMUX_RUNNER_TRACE_PREFIX attach-session -t =prefix-only" \
         "missing exact target was not passed to attach-session"
     run_inside_failure t3-prefix-missing-inside "$root" "$home" "$xdg_home" \
         source "$RUNNER" a -t prefix-only
     assert_contains "$LAST_INSIDE_TRACE" \
-        "$TMUX_PATH switch-client -t =prefix-only" \
+        "$TMUX_RUNNER_TRACE_PREFIX switch-client -t =prefix-only" \
         "missing exact target was not passed to switch-client"
 
     assert_session_set "$root" "T3 session set changed" \
@@ -1205,7 +1445,7 @@ function test_t4_list {
     finish_current_pty
     assert_last_pty_succeeded "alpha ls selection failed"
     assert_contains "$LAST_TRANSCRIPT" \
-        "$TMUX_PATH attach-session -t =alpha" \
+        "$TMUX_RUNNER_TRACE_PREFIX attach-session -t =alpha" \
         "alpha selection did not use the exact target"
 
     expected_rows=$(run_tmux "$selected_root" list-sessions)
@@ -1252,7 +1492,7 @@ function test_t4_list {
     finish_current_pty
     assert_last_pty_succeeded "inside ls client failed"
     assert_contains "$LAST_INSIDE_TRACE" \
-        "$TMUX_PATH switch-client -t =gamma" \
+        "$TMUX_RUNNER_TRACE_PREFIX switch-client -t =gamma" \
         "inside ls did not use the exact switch target"
 
     fingerprint_before=$(server_fingerprint "$selected_root")
@@ -1394,6 +1634,7 @@ function test_t6_install {
     local xdg_home=""
     local installed_runner=""
     local installed_completion=""
+    local installed_config=""
     local inventory=""
     local expected_inventory=""
     local source_normalized=""
@@ -1406,30 +1647,37 @@ function test_t6_install {
     local install_epoch=0
     local install_before=0
     local install_after=0
+    local preserved_config=""
 
     create_tmux_root t6
     root="$NEW_TMUX_ROOT"
     home="$WORKSPACE/t6/home with space"
-    xdg_home="$WORKSPACE/t6/xdg"
+    xdg_home="$WORKSPACE/t6/xdg config with space"
     mkdir -p -- "$home" "$xdg_home"
     installed_runner="$home/.local/bin/tmux-runner"
     installed_completion="$home/.local/share/bash-completion/completions/tmux-runner"
+    installed_config="$xdg_home/tmux-runner/tmux.conf"
+    preserved_config="$WORKSPACE/t6/preserved-tmux.conf"
     source_normalized="$WORKSPACE/t6/source.normalized"
     installed_normalized="$WORKSPACE/t6/installed.normalized"
 
     install_before=$(date -u '+%s')
     assert_command_succeeds "make install failed" \
+        env XDG_CONFIG_HOME="$xdg_home" \
         make -C "$REPO_ROOT" HOME="$home" install
-    install_after=$(date -u '+%s')
-    inventory=$(find "$home" \( -type f -o -type l \) -print | LC_ALL=C sort)
-    expected_inventory=$(printf '%s\n%s\n' \
-        "$installed_runner" "$installed_completion" | LC_ALL=C sort)
+    inventory=$(find "$home" "$xdg_home" \( -type f -o -type l \) \
+        -print | LC_ALL=C sort)
+    expected_inventory=$(printf '%s\n%s\n%s\n' \
+        "$installed_runner" "$installed_completion" "$installed_config" | \
+        LC_ALL=C sort)
     assert_equal "$expected_inventory" "$inventory" \
         "install wrote an unexpected file"
     assert_equal "0755" "0$(stat -c '%a' "$installed_runner")" \
         "installed runner mode is wrong"
     assert_equal "0644" "0$(stat -c '%a' "$installed_completion")" \
         "installed completion mode is wrong"
+    assert_equal "0644" "0$(stat -c '%a' "$installed_config")" \
+        "installed config mode is wrong"
     sed -e 's/^readonly RUNNER_GIT_HASH=.*/readonly RUNNER_GIT_HASH="normalized"/' \
         -e 's/^readonly RUNNER_COMMIT_DATE=.*/readonly RUNNER_COMMIT_DATE="normalized"/' \
         -e 's/^readonly RUNNER_INSTALL_DATE=.*/readonly RUNNER_INSTALL_DATE="normalized"/' \
@@ -1444,6 +1692,18 @@ function test_t6_install {
     assert_command_succeeds \
         "installed completion differs from shipped completion" \
         cmp -s "$COMPLETION" "$installed_completion"
+    assert_command_succeeds \
+        "installed config differs from shipped config" \
+        cmp -s "$RUNNER_CONFIG" "$installed_config"
+
+    printf '%s\n' 'set -g @local-preserved yes' > "$installed_config"
+    cp "$installed_config" "$preserved_config"
+    assert_command_succeeds "second make install failed" \
+        env XDG_CONFIG_HOME="$xdg_home" \
+        make -C "$REPO_ROOT" HOME="$home" install
+    install_after=$(date -u '+%s')
+    assert_command_succeeds "second install changed the local config" \
+        cmp -s "$preserved_config" "$installed_config"
 
     expected_hash=$(git -C "$REPO_ROOT" rev-parse --short HEAD)
     if ! git -C "$REPO_ROOT" diff --quiet HEAD --; then
@@ -1473,9 +1733,10 @@ function test_t6_install {
     run_outside_success t6-installed-attach "$root" "$home" "$xdg_home" \
         "$installed_runner" install-target attach -t install-target
     assert_contains "$LAST_TRANSCRIPT" \
-        "$TMUX_PATH attach-session -t =install-target" \
+        "$TMUX_PATH -L $RUNNER_SERVER_NAME -f '$installed_config' attach-session -t =install-target" \
         "installed runner did not use the exact target"
-    pass_test T6 "isolated local installation and installed execution"
+    pass_test T6 \
+        "isolated local installation, config preservation, and execution"
 }
 
 function test_t7_documentation {
@@ -1501,13 +1762,23 @@ function test_t7_documentation {
         "README omits exact target behavior"
     assert_contains "$README" "\`TMUX_TMPDIR\`" \
         "README omits outside UDS selection"
-    assert_contains "$README" "inherits the current client's" \
+    assert_contains "$README" "tmux -L tmux-runner" \
+        "README omits the dedicated server"
+    assert_contains "$README" "Inside the dedicated server" \
         "README omits inside client data flow"
+    assert_contains "$README" "detach and rerun" \
+        "README omits the other-server boundary"
+    assert_contains "$README" "tmux-runner/tmux.conf" \
+        "README omits the local config path"
+    assert_contains "$README" "take effect the next time" \
+        "README omits config start-time behavior"
     assert_contains "$README" ".local/bin/tmux-runner" \
         "README omits runner install path"
     assert_contains "$README" \
         ".local/share/bash-completion/completions/tmux-runner" \
         "README omits completion install path"
+    assert_contains "$README" "preserve the local file byte for byte" \
+        "README omits config preservation"
     assert_contains "$README" "make install" \
         "README omits the install command"
     assert_contains "$README" "command -v bash" \
@@ -1532,10 +1803,12 @@ function test_t7_documentation {
         "README omits the Make version check"
     assert_contains "$README" "export PATH=\"\$HOME/.local/bin:\$PATH\"" \
         "README omits current-shell PATH preparation"
-    assert_contains "$README" 'make HOME="/path/to/home" install' \
-        "README test-home install command does not quote HOME"
-    assert_contains "$README" 'make -n HOME="/path/to/home" install' \
-        "README test-home dry-run command does not quote HOME"
+    assert_contains "$README" \
+        'make HOME="/path/to/home" XDG_CONFIG_HOME="/path/to/home/.config" install' \
+        "README test-home install command does not isolate both paths"
+    assert_contains "$README" \
+        'make -n HOME="/path/to/home" XDG_CONFIG_HOME="/path/to/home/.config" install' \
+        "README test-home dry-run command does not isolate both paths"
     assert_contains "$README" "From the repository root" \
         "README omits the install working directory"
     assert_contains "$README" \
@@ -1775,9 +2048,352 @@ function test_t9_version {
     pass_test T9 "source and installed version metadata"
 }
 
+function test_m3_t1_static_server_path {
+    local runner_tmux_calls=0
+
+    # These patterns inspect literal variable references in the shipped code.
+    # shellcheck disable=SC2016
+    runner_tmux_calls=$(grep -Ec '^[[:space:]]*"\$TMUX_BIN"' "$RUNNER")
+    assert_equal "1" "$runner_tmux_calls" \
+        "runner has a tmux invocation outside the centralized wrapper"
+    # shellcheck disable=SC2016
+    assert_contains "$RUNNER" \
+        '"$TMUX_BIN" -L "$TMUX_SERVER_NAME" -f "$config_file"' \
+        "runner tmux wrapper omits the named server or config"
+    assert_contains "$COMPLETION" "tmux -L tmux-runner -f" \
+        "completion does not use the dedicated server"
+    assert_contains "$RUNNER_CONFIG" \
+        "Local configuration for the tmux-runner server." \
+        "starter config is not the shipped no-op file"
+    pass_test M3-T1 "centralized dedicated-server path"
+}
+
+function test_m3_t2_server_isolation {
+    local root=""
+    local home=""
+    local xdg_home=""
+    local list_output="$WORKSPACE/m3-t2/list.out"
+    local list_error="$WORKSPACE/m3-t2/list.err"
+    local completion_output=""
+    local default_before=""
+    local rc=0
+
+    create_tmux_root m3-t2
+    root="$NEW_TMUX_ROOT"
+    home="$WORKSPACE/m3-t2/home"
+    xdg_home="$WORKSPACE/m3-t2/xdg"
+    mkdir -p -- "$home" "$xdg_home"
+    run_default_tmux "$root" -f /dev/null new-session -d -s default-only
+    run_tmux "$root" -f /dev/null new-session -d -s runner-only
+    default_before=$(one_server_snapshot "$root" default)
+
+    env -u TMUX HOME="$home" XDG_CONFIG_HOME="$xdg_home" \
+        TMUX_TMPDIR="$root" bash "$RUNNER" ls \
+        > "$list_output" 2> "$list_error" <<< "invalid" || rc=$?
+    assert_equal "2" "$rc" "dedicated ls invalid selection returned wrong status"
+    assert_contains "$list_output" "runner-only:" \
+        "dedicated ls omitted its session"
+    assert_not_contains "$list_output" "default-only:" \
+        "dedicated ls exposed a default-server session"
+
+    # Positional parameters are expanded by the completion subprocess.
+    # shellcheck disable=SC2016
+    completion_output=$(env HOME="$home" XDG_CONFIG_HOME="$xdg_home" \
+        TMUX_TMPDIR="$root" bash -c \
+        'source "$1"; COMP_WORDS=(tmux-runner attach ""); COMP_CWORD=2; _tmux_runner; printf "%s\n" "${COMPREPLY[@]}"' \
+        bash "$COMPLETION")
+    assert_contains <(printf '%s\n' "$completion_output") "runner-only" \
+        "completion omitted the dedicated session"
+    if grep -Fx -- "default-only" <<< "$completion_output" >/dev/null; then
+        fail_test "completion exposed a default-server session"
+    fi
+
+    run_outside_success m3-t2-attach "$root" "$home" "$xdg_home" \
+        "$RUNNER" runner-only attach runner-only
+    run_outside_success m3-t2-create "$root" "$home" "$xdg_home" \
+        "$RUNNER" runner-created create -s runner-created -c "$home"
+    assert_equal "$default_before" "$(one_server_snapshot "$root" default)" \
+        "runner operations changed the default server"
+    assert_session_set "$root" "dedicated session set is wrong" \
+        runner-only runner-created
+    assert_equal "default-only" \
+        "$(run_default_tmux "$root" list-sessions -F '#{session_name}')" \
+        "default server session set changed"
+    pass_test M3-T2 "create, list, attach, and completion server isolation"
+}
+
+function test_m3_t3_config_lifecycle {
+    local root=""
+    local home=""
+    local xdg_home=""
+    local config_file=""
+    local default_before=""
+    local marker=""
+    local binding=""
+
+    create_tmux_root m3-t3
+    root="$NEW_TMUX_ROOT"
+    home="$WORKSPACE/m3-t3/home"
+    xdg_home="$WORKSPACE/m3-t3/xdg"
+    config_file="$xdg_home/tmux-runner/tmux.conf"
+    mkdir -p -- "$home" "${config_file%/*}"
+    printf '%s\n' 'set -g @general-marker general' > "$home/.tmux.conf"
+    env -u TMUX HOME="$home" TMUX_TMPDIR="$root" \
+        tmux -f "$home/.tmux.conf" new-session -d -s default-config
+    assert_equal "general" \
+        "$(run_default_tmux "$root" show-options -gv @general-marker)" \
+        "default server did not load its general marker"
+    default_before=$(one_server_snapshot "$root" default)
+
+    run_outside_success m3-t3-absent "$root" "$home" "$xdg_home" \
+        "$RUNNER" isolated create -s isolated -c "$home"
+    marker=$(run_tmux "$root" show-options -gv @general-marker 2>/dev/null || true)
+    assert_equal "" "$marker" \
+        "absent runner config allowed the general tmux config"
+    run_tmux "$root" kill-server
+
+    cp "$RUNNER_CONFIG" "$config_file"
+    run_outside_success m3-t3-starter "$root" "$home" "$xdg_home" \
+        "$RUNNER" starter create -s starter -c "$home"
+    run_tmux "$root" kill-server
+
+    {
+        printf '%s\n' 'set -g @runner-marker one'
+        printf '%s\n' 'set -g status off'
+        printf '%s\n' 'bind-key C-r display-message runner-one'
+    } > "$config_file"
+    run_outside_success m3-t3-first "$root" "$home" "$xdg_home" \
+        "$RUNNER" configured create -s configured -c "$home"
+    assert_equal "one" "$(run_tmux "$root" show-options -gv @runner-marker)" \
+        "runner config marker did not load"
+    assert_equal "off" "$(run_tmux "$root" show-options -gv status)" \
+        "runner config status option did not load"
+    binding=$(run_tmux "$root" list-keys -T prefix C-r)
+    if ! grep -F -- "runner-one" <<< "$binding" >/dev/null; then
+        fail_test "runner config key binding did not load"
+    fi
+
+    {
+        printf '%s\n' 'set -g @runner-marker two'
+        printf '%s\n' 'set -g status on'
+        printf '%s\n' 'bind-key C-r display-message runner-two'
+    } > "$config_file"
+    run_outside_success m3-t3-running "$root" "$home" "$xdg_home" \
+        "$RUNNER" configured attach configured
+    assert_equal "one" "$(run_tmux "$root" show-options -gv @runner-marker)" \
+        "running server reloaded its config"
+    assert_equal "off" "$(run_tmux "$root" show-options -gv status)" \
+        "running server changed its status option"
+
+    run_tmux "$root" kill-server
+    run_outside_success m3-t3-restart "$root" "$home" "$xdg_home" \
+        "$RUNNER" configured-again create -s configured-again -c "$home"
+    assert_equal "two" "$(run_tmux "$root" show-options -gv @runner-marker)" \
+        "restarted server did not reload its config"
+    assert_equal "on" "$(run_tmux "$root" show-options -gv status)" \
+        "restarted server did not reload its status option"
+    binding=$(run_tmux "$root" list-keys -T prefix C-r)
+    if ! grep -F -- "runner-two" <<< "$binding" >/dev/null; then
+        fail_test "restarted server did not reload its key binding"
+    fi
+    assert_equal "$default_before" "$(one_server_snapshot "$root" default)" \
+        "runner config lifecycle changed the default server"
+    pass_test M3-T3 "isolated first-start config and dedicated-only reload"
+}
+
+function test_m3_t4_client_boundary {
+    local root=""
+    local home=""
+    local xdg_home=""
+    local source_session="default-client"
+    local status=""
+    local runner_socket=""
+
+    create_tmux_root m3-t4
+    root="$NEW_TMUX_ROOT"
+    home="$WORKSPACE/m3-t4/home"
+    xdg_home="$WORKSPACE/m3-t4/xdg"
+    mkdir -p -- "$home" "$xdg_home"
+    runner_socket="$root/tmux-$UID/$RUNNER_SERVER_NAME"
+    run_default_tmux "$root" -f /dev/null new-session -d -s "$source_session"
+    start_default_source_client m3-t4 "$root" "$home" "$xdg_home" \
+        "$source_session"
+    if [[ -e "$runner_socket" ]]; then
+        fail_test "client-boundary fixture started the dedicated socket early"
+    fi
+
+    start_dual_state_monitor m3-t4 "$root"
+    invoke_runner_inside_default m3-t4-reject "$root" "$home" "$xdg_home" \
+        "$source_session" "$RUNNER" create -s forbidden -c "$home"
+    if ! wait_for_file "$LAST_INSIDE_STATUS"; then
+        fail_test "other-server rejection did not record status"
+    fi
+    status=$(inside_runner_status)
+    assert_not_equal "0" "$status" \
+        "runner accepted a client from another server"
+    assert_contains "$LAST_INSIDE_TRACE" \
+        "detach and rerun tmux-runner from the outer shell" \
+        "other-server rejection omitted detach guidance"
+    stop_state_monitor m3-t4
+    if [[ -e "$runner_socket" ]]; then
+        fail_test "other-server rejection created the dedicated socket"
+    fi
+
+    invoke_runner_inside_default m3-t4-help "$root" "$home" "$xdg_home" \
+        "$source_session" "$RUNNER" --help
+    if ! wait_for_file "$LAST_INSIDE_STATUS"; then
+        fail_test "help inside another server did not record status"
+    fi
+    assert_equal "0" "$(inside_runner_status)" \
+        "help inside another server failed"
+    assert_contains "$LAST_INSIDE_TRACE" "Session commands use the dedicated" \
+        "help omitted the dedicated-server contract"
+
+    invoke_runner_inside_default m3-t4-version "$root" "$home" "$xdg_home" \
+        "$source_session" "$RUNNER" --version
+    if ! wait_for_file "$LAST_INSIDE_STATUS"; then
+        fail_test "version inside another server did not record status"
+    fi
+    assert_equal "0" "$(inside_runner_status)" \
+        "version inside another server failed"
+    if [[ -e "$runner_socket" ]]; then
+        fail_test "dependency-free commands created the dedicated socket"
+    fi
+    detach_current_client
+    finish_current_pty
+    assert_last_pty_succeeded "default source client failed"
+    pass_test M3-T4 "dedicated switching and cold other-server rejection"
+}
+
+function assert_manifest_processes_stopped {
+    local manifest="$1"
+    local process_id=""
+
+    while IFS= read -r process_id; do
+        if [[ -n "$process_id" ]] && kill -0 "$process_id" 2>/dev/null; then
+            printf 'Tracked process is still running: %s\n' "$process_id" >&2
+            return 1
+        fi
+    done < <(awk -F '\t' '$1 == "pid" { print $2 }' "$manifest")
+}
+
+function manifest_workspace {
+    local manifest="$1"
+
+    awk -F '\t' '$1 == "workspace" { print $2; exit }' "$manifest"
+}
+
+function remove_supervisor_control_files {
+    local success_manifest="$1"
+    local failure_manifest="$2"
+    local failure_output="$3"
+
+    rm -f -- "$success_manifest" "$failure_manifest" "$failure_output"
+}
+
+function run_forced_cleanup_probe {
+    local root=""
+    local probe_pid=""
+
+    require_dependencies
+    WORKSPACE=$(mktemp -d /tmp/tmux-runner-test.XXXXXX)
+    record_manifest workspace "$WORKSPACE"
+    mkdir -p -- "$WORKSPACE/pty"
+    create_tmux_root cleanup-probe
+    root="$NEW_TMUX_ROOT"
+    run_tmux "$root" -f /dev/null new-session -d -s cleanup-probe
+    setsid sleep 60 &
+    probe_pid=$!
+    EXTRA_PTY_PIDS+=("$probe_pid")
+    record_manifest pid "$probe_pid"
+    fail_test "forced cleanup probe"
+}
+
+function run_supervisor {
+    local script_path="$TEST_DIR/test-tmux-runner.bash"
+    local success_manifest=""
+    local failure_manifest=""
+    local failure_output=""
+    local success_workspace=""
+    local failure_workspace=""
+    local socket_file=""
+    local child_rc=0
+    local probe_rc=0
+
+    success_manifest=$(mktemp /tmp/tmux-runner-manifest.XXXXXX)
+    failure_manifest=$(mktemp /tmp/tmux-runner-manifest.XXXXXX)
+    failure_output=$(mktemp /tmp/tmux-runner-failure.XXXXXX)
+
+    TMUX_RUNNER_TEST_CHILD=1 \
+        TMUX_RUNNER_TEST_MANIFEST="$success_manifest" \
+        bash "$script_path" || child_rc=$?
+    success_workspace=$(manifest_workspace "$success_manifest")
+    if (( child_rc != 0 )); then
+        printf 'Test child failed with exit %d.\n' "$child_rc" >&2
+        remove_supervisor_control_files \
+            "$success_manifest" "$failure_manifest" "$failure_output"
+        return "$child_rc"
+    fi
+    if [[ -z "$success_workspace" ]] || [[ -e "$success_workspace" ]]; then
+        printf 'Passing child left its workspace: %s\n' \
+            "$success_workspace" >&2
+        remove_supervisor_control_files \
+            "$success_manifest" "$failure_manifest" "$failure_output"
+        return 1
+    fi
+    if ! assert_manifest_processes_stopped "$success_manifest"; then
+        remove_supervisor_control_files \
+            "$success_manifest" "$failure_manifest" "$failure_output"
+        return 1
+    fi
+
+    TMUX_RUNNER_TEST_CHILD=1 TMUX_RUNNER_TEST_FORCE_FAILURE=1 \
+        TMUX_RUNNER_TEST_MANIFEST="$failure_manifest" \
+        bash "$script_path" > "$failure_output" 2>&1 || probe_rc=$?
+    if (( probe_rc == 0 )); then
+        printf 'Forced cleanup probe unexpectedly succeeded.\n' >&2
+        remove_supervisor_control_files \
+            "$success_manifest" "$failure_manifest" "$failure_output"
+        return 1
+    fi
+    failure_workspace=$(manifest_workspace "$failure_manifest")
+    if [[ -z "$failure_workspace" ]] || [[ ! -d "$failure_workspace" ]]; then
+        printf 'Forced failure did not preserve its workspace.\n' >&2
+        remove_supervisor_control_files \
+            "$success_manifest" "$failure_manifest" "$failure_output"
+        return 1
+    fi
+    if ! grep -F -- "Diagnostic workspace: $failure_workspace" \
+        "$failure_output" >/dev/null; then
+        printf 'Forced failure did not report its workspace.\n' >&2
+        remove_supervisor_control_files \
+            "$success_manifest" "$failure_manifest" "$failure_output"
+        return 1
+    fi
+    if ! assert_manifest_processes_stopped "$failure_manifest"; then
+        remove_supervisor_control_files \
+            "$success_manifest" "$failure_manifest" "$failure_output"
+        return 1
+    fi
+    socket_file=$(find "$failure_workspace" -type s -print -quit)
+    if [[ -n "$socket_file" ]]; then
+        printf 'Forced failure left a socket: %s\n' "$socket_file" >&2
+        remove_supervisor_control_files \
+            "$success_manifest" "$failure_manifest" "$failure_output"
+        return 1
+    fi
+
+    chmod -R u+w -- "$failure_workspace"
+    rm -rf -- "$failure_workspace"
+    remove_supervisor_control_files \
+        "$success_manifest" "$failure_manifest" "$failure_output"
+    printf 'PASS M3-T5: outer supervisor cleanup and failure retention\n'
+}
+
 function main {
     require_dependencies
     WORKSPACE=$(mktemp -d /tmp/tmux-runner-test.XXXXXX)
+    record_manifest workspace "$WORKSPACE"
     mkdir -p -- "$WORKSPACE/pty"
 
     test_t1_static
@@ -1789,7 +2405,19 @@ function main {
     test_t7_documentation
     test_t8_help
     test_t9_version
+    test_m3_t1_static_server_path
+    test_m3_t2_server_isolation
+    test_m3_t3_config_lifecycle
+    test_m3_t4_client_boundary
     printf 'PASS: %d milestone checks completed\n' "$TESTS_PASSED"
 }
 
-main "$@"
+if [[ "${TMUX_RUNNER_TEST_CHILD:-}" == "1" ]]; then
+    if [[ "${TMUX_RUNNER_TEST_FORCE_FAILURE:-}" == "1" ]]; then
+        run_forced_cleanup_probe
+    else
+        main "$@"
+    fi
+else
+    run_supervisor
+fi

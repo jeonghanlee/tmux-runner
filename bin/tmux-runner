@@ -7,6 +7,7 @@ readonly RUNNER_VERSION="0.1.0"
 readonly RUNNER_GIT_HASH="unknown"
 readonly RUNNER_COMMIT_DATE="unreleased"
 readonly RUNNER_INSTALL_DATE="unreleased"
+readonly TMUX_SERVER_NAME="tmux-runner"
 TMUX_BIN=$(type -P tmux || true)
 readonly TMUX_BIN
 HOSTNAME_BIN=$(type -P hostname || true)
@@ -30,6 +31,12 @@ function print_usage {
     printf '\nOptions:\n'
     printf '  -V, --version  Show version and Git metadata.\n'
     printf '  -h, --help     Show this help and exit.\n'
+    printf '\nServer:\n'
+    printf '  Session commands use the dedicated tmux -L tmux-runner server.\n'
+    # The help text documents the shell fallback expression literally.
+    # shellcheck disable=SC2016
+    printf '  Config: ${XDG_CONFIG_HOME:-$HOME/.config}/tmux-runner/tmux.conf\n'
+    printf '  Detach before running a session command from another tmux server.\n'
 }
 
 function print_version {
@@ -170,14 +177,52 @@ function normalize_session_name {
     printf '%s\n' "$session_name"
 }
 
+function runner_config_file {
+    local config_home="${XDG_CONFIG_HOME:-${HOME}/.config}"
+
+    printf '%s/tmux-runner/tmux.conf\n' "$config_home"
+}
+
+function runner_socket_path {
+    local socket_root="${TMUX_TMPDIR:-/tmp}"
+
+    socket_root="${socket_root%/}"
+    printf '%s/tmux-%s/%s\n' "$socket_root" "$UID" "$TMUX_SERVER_NAME"
+}
+
+function validate_client_server {
+    local current_socket=""
+    local expected_socket=""
+
+    if [[ -z "${TMUX:-}" ]]; then
+        return 0
+    fi
+    current_socket="${TMUX%%,*}"
+    expected_socket=$(runner_socket_path)
+    if [[ "$current_socket" != "$expected_socket" ]]; then
+        fail "current tmux client uses another server; detach and rerun tmux-runner from the outer shell"
+        return
+    fi
+}
+
+function run_tmux_command {
+    local config_file=""
+
+    config_file=$(runner_config_file)
+    if [[ ! -e "$config_file" ]]; then
+        config_file="/dev/null"
+    fi
+    "$TMUX_BIN" -L "$TMUX_SERVER_NAME" -f "$config_file" "$@"
+}
+
 function connect_session {
     local session_name="$1"
     local target="=$session_name"
 
     if [[ -n "${TMUX:-}" ]]; then
-        "$TMUX_BIN" switch-client -t "$target"
+        run_tmux_command switch-client -t "$target"
     else
-        "$TMUX_BIN" attach-session -t "$target"
+        run_tmux_command attach-session -t "$target"
     fi
 }
 
@@ -265,11 +310,11 @@ function run_create {
     fi
     target="=$session_name"
 
-    if ! "$TMUX_BIN" has-session -t "$target" 2>/dev/null; then
-        create_output=$("$TMUX_BIN" new-session -d -s "$session_name" \
+    if ! run_tmux_command has-session -t "$target" 2>/dev/null; then
+        create_output=$(run_tmux_command new-session -d -s "$session_name" \
             -c "$resolved_directory" 2>&1) || create_rc=$?
         if (( create_rc != 0 )); then
-            if ! "$TMUX_BIN" has-session -t "$target" 2>/dev/null; then
+            if ! run_tmux_command has-session -t "$target" 2>/dev/null; then
                 if [[ -n "$create_output" ]]; then
                     printf '%s\n' "$create_output" >&2
                 fi
@@ -348,7 +393,7 @@ function run_list {
         fail "ls does not accept arguments"
         return
     fi
-    if ! output=$("$TMUX_BIN" list-sessions); then
+    if ! output=$(run_tmux_command list-sessions); then
         return 1
     fi
     mapfile -t rows <<< "$output"
@@ -443,6 +488,7 @@ function main {
         fail "tmux is not available in PATH"
         return
     fi
+    validate_client_server || return
 
     case "$command_name" in
         create|c)

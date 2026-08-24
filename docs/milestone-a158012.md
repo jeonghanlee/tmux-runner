@@ -17,8 +17,8 @@ Canonical branch or ref: master
 Git upstream: origin/master
 Remote tracker: none
 
-Next session entry point: review and authorize M3 implementation against the
-accepted plan in this document.
+Next session entry point: implement M3 against the accepted plan in this
+document.
 
 ## Milestone
 
@@ -28,13 +28,13 @@ accepted plan in this document.
 | --- | --- | --- | --- | --- | --- | --- | --- |
 | Core | M1 | Deliver the local tmux runner | Milestone | Complete | No | D1, D2, D3, D4, D5, D6, D7, D8, D9, D10 | Complete 2026-08-20, correction commit `ede2b62`; corrected T1-T8, third-person review, and final second-person reader pass accepted; [detail](#m1---deliver-the-local-tmux-runner) |
 | Version | M2 | Add source and installed version identity | Milestone | Complete | No | M1, D11, D12 | Complete 2026-08-23, carrying commit `88d20a4`; M2 / T1-T5, shipped suite T1-T9, and the stage review cycle accepted; [detail](#m2---add-source-and-installed-version-identity) |
-| Server | M3 | Isolate the runner server and local tmux configuration | Milestone | Not started | Yes | M2, D13, D14, D17 | Ready for implementation; dedicated-server behavior and boundaries are resolved; [detail](#m3---isolate-the-runner-server-and-local-tmux-configuration) |
+| Server | M3 | Isolate the runner server and local tmux configuration | Milestone | In progress | No | M2, D13, D14, D17 | Implementation authorized 2026-08-24; [detail](#m3---isolate-the-runner-server-and-local-tmux-configuration) |
 | Identity | M4 | Resolve repository and working-directory identity | Milestone | Not started | No | M3, D16 | Starts after M3; [detail](#m4---resolve-repository-and-working-directory-identity) |
 | Discovery | M5 | Discover configured repositories and select one | Milestone | Not started | No | M4, D15, D17 | Starts after M4; [detail](#m5---discover-configured-repositories-and-select-one) |
 | Navigation | M6 | Add recent and previous-session navigation | Milestone | Not started | No | M5, D18 | Starts after M5; [detail](#m6---add-recent-and-previous-session-navigation) |
 | Integration | M7 | Complete integrated verification and release preparation | Milestone | Not started | No | M3, M4, M5, M6, D17 | Starts after M3-M6; [detail](#m7---complete-integrated-verification-and-release-preparation) |
 
-Milestone tally: Complete 2, Not started 5.
+Milestone tally: Complete 2, In progress 1, Not started 4.
 
 ### Decisions
 
@@ -279,7 +279,7 @@ Superseded Plan Artifacts: none
 Origin: a158012 / M3
 Identity History: none
 GitHub Issue: none
-Status: Not started
+Status: In progress
 
 ##### Summary
 
@@ -342,7 +342,7 @@ and prescribing a site-specific status layout or key map.
 Plan Status: accepted
 Plan Acceptance: 2026-08-23 - accepted the staged roadmap and dedicated-server
 behavior.
-Implementation Authorization: none
+Implementation Authorization: 2026-08-24 - full M3 implementation authorized
 Superseded Plan Artifacts: none
 
 1. Centralize the tmux command prefix and server identity so every runner and
@@ -373,15 +373,22 @@ Superseded Plan Artifacts: none
 
 | Label | Observed At | Environment | Result | Evidence |
 | --- | --- | --- | --- | --- |
-| T1 | Pending | Pending | Pending | Implementation has not started. |
-| T2 | Pending | Pending | Pending | Implementation has not started. |
-| T3 | Pending | Pending | Pending | Implementation has not started. |
-| T4 | Pending | Pending | Pending | Implementation has not started. |
-| T5 | Pending | Pending | Pending | Implementation has not started. |
+| T1 | 2026-08-24 | Repository checkout; Bash and ShellCheck | Pass | The shipped scripts passed syntax and ShellCheck; static inspection found one centralized executable tmux invocation and the dedicated completion query. |
+| T2 | 2026-08-24 | Real default and named tmux servers under one `TMUX_TMPDIR`; PTYs and completion subprocess | Pass | Create, list, attach, and completion reached only the named server while the default-server snapshot remained unchanged. |
+| T3 | 2026-08-24 | Temporary `HOME`, XDG config, real tmux options and key table, repeated named-server starts | Pass | General config was excluded; runner marker, status, and key values loaded only at server start; named-only restart reloaded them; install preserved a modified config. |
+| T4 | 2026-08-24 | Real default-server client, cold named socket, dual-server monitor, PTY | Pass | The mutable command failed with detach guidance before socket creation; help and version succeeded; both server snapshots remained unchanged. |
+| T5 | 2026-08-24 | Full shipped T1-T9 and M3 T1-T4 child plus forced-failure child under outer supervisor | Pass | Existing behavior passed; the passing child left no tracked process, socket, or workspace; the forced failure stopped processes and sockets, reported and preserved its workspace, and the supervisor removed it after inspection. |
 
 ##### Closure Evidence
 
-- None; implementation has not started.
+- `tests/test-tmux-runner.bash` passed the existing T1-T9 checks, M3 / T1-T4,
+  and the outer-supervisor M3 / T5 check on 2026-08-24.
+- The 2026-08-24 third-person review accepted M3 after narrowing the README
+  other-server statement to session commands; its independent shipped-suite
+  run and `git diff --check` passed.
+- The 2026-08-24 second-person review accepted M3 after aligning help, test
+  installation paths, install output, and the remaining detach instruction.
+- The carrying commit is pending.
 
 #### M4 - Resolve repository and working-directory identity
 
@@ -463,7 +470,7 @@ existing session when a later collision appears, and repository discovery.
 Plan Status: accepted
 Plan Acceptance: 2026-08-23 - accepted repository-root, linked-worktree,
 collision, and normal-directory identity behavior.
-Implementation Authorization: none
+Implementation Authorization: 2026-08-24 - full M4 implementation authorized
 Superseded Plan Artifacts: none
 
 1. Add canonical working-path and Git top-level resolution without replacing
@@ -580,7 +587,7 @@ including bare repositories or arbitrary directories in `repo`.
 Plan Status: accepted
 Plan Acceptance: 2026-08-23 - accepted a separate `repo` command, literal
 root configuration, and numbered create-or-attach selection.
-Implementation Authorization: none
+Implementation Authorization: 2026-08-24 - full M5 implementation authorized
 Superseded Plan Artifacts: none
 
 1. Add a literal line parser for configured roots with canonicalization,
@@ -699,7 +706,7 @@ sessions, unlimited history, and recording commands executed inside tmux.
 Plan Status: accepted
 Plan Acceptance: 2026-08-23 - accepted recent selection, previous-session
 navigation, XDG state placement, and success-only atomic updates.
-Implementation Authorization: none
+Implementation Authorization: 2026-08-24 - full M6 implementation authorized
 Superseded Plan Artifacts: none
 
 1. Define literal, versioned state records below a mode `0700` XDG state
@@ -805,7 +812,7 @@ another selection dependency.
 Plan Status: accepted
 Plan Acceptance: 2026-08-23 - accepted final installation, documentation,
 integrated verification, and release-preparation scope.
-Implementation Authorization: none
+Implementation Authorization: 2026-08-24 - full M7 implementation authorized
 Superseded Plan Artifacts: none
 
 1. Reverify non-overwriting local installation of every shipped artifact and

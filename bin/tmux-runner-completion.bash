@@ -1,12 +1,26 @@
+function _tmux_runner_config_file {
+    local config_home="${XDG_CONFIG_HOME:-${HOME}/.config}"
+
+    printf '%s/tmux-runner/tmux.conf\n' "$config_home"
+}
+
 function _tmux_runner_complete_sessions {
     local current="$1"
+    local config_file=""
     local session=""
 
+    config_file=$(_tmux_runner_config_file)
+    if [[ ! -e "$config_file" ]]; then
+        config_file="/dev/null"
+    fi
     while IFS= read -r session; do
         if [[ "$session" == "$current"* ]]; then
             COMPREPLY+=("$session")
         fi
-    done < <(tmux list-sessions -F '#{session_name}' 2>/dev/null)
+    done < <(
+        tmux -L tmux-runner -f "$config_file" \
+            list-sessions -F '#{session_name}' 2>/dev/null
+    )
 }
 
 function _tmux_runner {

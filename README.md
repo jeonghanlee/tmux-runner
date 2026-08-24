@@ -1,20 +1,27 @@
 # tmux-runner
 
 `tmux-runner` is a local Bash front end for repository-oriented tmux
-sessions. It creates, lists, and enters sessions through the tmux CLI while
-leaving server and Unix domain socket management to tmux.
+sessions. It creates, lists, and enters sessions on a dedicated tmux server.
 
 ## Architecture
 
-The runner has one executable, one Bash completion file, and one local install
-target. Every session lookup uses an exact tmux target. Outside tmux, a
-successful command uses `attach-session`; inside tmux, it uses
-`switch-client`.
+Every tmux operation uses `tmux -L tmux-runner`. The resulting Unix domain
+socket is `${TMUX_TMPDIR:-/tmp}/tmux-<uid>/tmux-runner`; the runner does not
+inspect or enumerate socket files. Default-server sessions are separate and
+are not listed, completed, moved, or changed by the runner.
+`TMUX_TMPDIR` selects the socket root when it is set.
 
-The runner does not inspect socket files. An outside command uses the server
-selected by tmux, including `TMUX_TMPDIR` when it is set. An inside command
-inherits the current client's `TMUX` value and therefore stays with that
-client's server.
+On the first command that starts the dedicated server, tmux reads
+`${XDG_CONFIG_HOME:-$HOME/.config}/tmux-runner/tmux.conf`. If that file is
+absent, the runner supplies `/dev/null`, excluding system and general user
+tmux configuration. Changes to the local file take effect the next time the
+dedicated server starts.
+
+Every session lookup uses an exact tmux target. Outside tmux, a successful
+command uses `attach-session`. Inside the dedicated server, it uses
+`switch-client`. A session command started inside another tmux server exits
+with an instruction to detach and rerun it from the outer shell before it
+queries or starts the dedicated server.
 
 ## Requirements
 
@@ -120,8 +127,8 @@ deployment identity when it is executed outside the repository.
 ## Bash Completion
 
 The completion file supplies commands, `-h` and `--help`, command options,
-directories after `-c`, and live session names for `attach` and `a`. Live
-session lookup uses the same tmux server selection as the current shell.
+directories after `-c`, and live session names for `attach` and `a`. Session
+lookup always uses the dedicated `tmux-runner` server.
 
 ## Installation
 
@@ -131,16 +138,19 @@ From the repository root, install for the current user:
 make install
 ```
 
-This writes only these files:
+This installs these files:
 
 ```text
 ~/.local/bin/tmux-runner
 ~/.local/share/bash-completion/completions/tmux-runner
+${XDG_CONFIG_HOME:-$HOME/.config}/tmux-runner/tmux.conf
 ```
 
 The executable is installed with mode `0755` and the completion file with mode
-`0644`. The install does not modify shell startup files. Prepare the current
-Bash session to find the installed executable, then confirm the resolved path:
+`0644`. The starter config is installed with mode `0644` only when the target
+does not already exist; later installs preserve the local file byte for byte.
+The install does not modify shell startup files. Prepare the current Bash
+session to find the installed executable, then confirm the resolved path:
 
 ```bash
 export PATH="$HOME/.local/bin:$PATH"
@@ -153,9 +163,10 @@ Register the installed completion in the current Bash session:
 source ~/.local/share/bash-completion/completions/tmux-runner
 ```
 
-A different test home can be supplied with
-`make HOME="/path/to/home" install`; inspect the same action without writing
-files with `make -n HOME="/path/to/home" install`.
+A different test home and its config path can be supplied with
+`make HOME="/path/to/home" XDG_CONFIG_HOME="/path/to/home/.config" install`.
+Inspect the same action without writing files with
+`make -n HOME="/path/to/home" XDG_CONFIG_HOME="/path/to/home/.config" install`.
 
 ## First Use
 
@@ -170,7 +181,8 @@ tmux-runner create
 The resulting session name is `<folder>-<short-hostname>`. Running the same
 command again enters the existing exact-name session. To return to the original
 shell first, press `Ctrl-b`, release the keys, and then press `d` to detach from
-tmux.
+tmux. Use the same detach sequence before running a `tmux-runner` session
+command from a client connected to the default or any other tmux server.
 
 ## Verification
 
