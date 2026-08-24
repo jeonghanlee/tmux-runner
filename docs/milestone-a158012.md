@@ -17,8 +17,8 @@ Canonical branch or ref: master
 Git upstream: origin/master
 Remote tracker: none
 
-Next session entry point: implement M6 against the accepted plan in this
-document.
+Next session entry point: record the M6 carrying commit, then implement M7
+against the accepted plan in this document.
 
 ## Milestone
 
@@ -30,11 +30,11 @@ document.
 | Version | M2 | Add source and installed version identity | Milestone | Complete | No | M1, D11, D12 | Complete 2026-08-23, carrying commit `88d20a4`; M2 / T1-T5, shipped suite T1-T9, and the stage review cycle accepted; [detail](#m2---add-source-and-installed-version-identity) |
 | Server | M3 | Isolate the runner server and local tmux configuration | Milestone | Complete | No | M2, D13, D14, D17 | Complete 2026-08-24, carrying commit `89095fb`; M3 / T1-T5 and both requested reviews accepted; [detail](#m3---isolate-the-runner-server-and-local-tmux-configuration) |
 | Identity | M4 | Resolve repository and working-directory identity | Milestone | Complete | No | M3, D16 | Complete 2026-08-24, carrying commit `8caaea1`; M4 / T1-T5 and both requested reviews accepted; [detail](#m4---resolve-repository-and-working-directory-identity) |
-| Discovery | M5 | Discover configured repositories and select one | Milestone | Complete | No | M4, D15, D17 | Complete 2026-08-24; M5 / T1-T5 and both requested reviews accepted; [detail](#m5---discover-configured-repositories-and-select-one) |
-| Navigation | M6 | Add recent and previous-session navigation | Milestone | Not started | Yes | M5, D18 | Ready after M5; [detail](#m6---add-recent-and-previous-session-navigation) |
+| Discovery | M5 | Discover configured repositories and select one | Milestone | Complete | No | M4, D15, D17 | Complete 2026-08-24, carrying commit `71ce91f`; M5 / T1-T5 and both requested reviews accepted; [detail](#m5---discover-configured-repositories-and-select-one) |
+| Navigation | M6 | Add recent and previous-session navigation | Milestone | In progress | No | M5, D18 | Implementation, M6 / T1-T5, and the third-person review are complete; the completion mark rides the M7 update; [detail](#m6---add-recent-and-previous-session-navigation) |
 | Integration | M7 | Complete integrated verification and release preparation | Milestone | Not started | No | M3, M4, M5, M6, D17 | Starts after M3-M6; [detail](#m7---complete-integrated-verification-and-release-preparation) |
 
-Milestone tally: Complete 5, In progress 0, Not started 2.
+Milestone tally: Complete 5, In progress 1, Not started 1.
 
 ### Decisions
 
@@ -650,7 +650,7 @@ Superseded Plan Artifacts: none
 Origin: a158012 / M6
 Identity History: none
 GitHub Issue: none
-Status: Not started
+Status: In progress
 
 ##### Summary
 
@@ -757,15 +757,24 @@ Superseded Plan Artifacts: none
 
 | Label | Observed At | Environment | Result | Evidence |
 | --- | --- | --- | --- | --- |
-| T1 | Pending | Pending | Pending | Implementation has not started. |
-| T2 | Pending | Pending | Pending | Implementation has not started. |
-| T3 | Pending | Pending | Pending | Implementation has not started. |
-| T4 | Pending | Pending | Pending | Implementation has not started. |
-| T5 | Pending | Pending | Pending | Implementation has not started. |
+| T1 | 2026-08-24 | Real Git, filesystem, dedicated tmux servers, PTYs, and temporary XDG state | Pass | `create`, `repo`, `recent`, direct `attach`, and `ls` produced a 20-entry canonical-path MRU containing only path-marked destinations. |
+| T2 | 2026-08-24 | Real named tmux servers, outside PTYs, and inside clients | Pass | Repeated `last` navigation alternated between the two previous distinct runner sessions without creating a session. |
+| T3 | 2026-08-24 | Real tmux, PTYs, filesystem locks, process termination, and temporary XDG state | Pass | Invalid and stale state, five-second lock failure, rollback isolation, acknowledged server loss, and acknowledged or unacknowledged orphan recovery preserved the defined outcome. |
+| T4 | 2026-08-24 | Real tmux, PTYs, concurrent readers and writers, and controlled outer-boundary ordering | Pass | Concurrent updates remained parseable and lossless, overflow retained the newest 20, and three same-sequence acknowledgment attempts received distinct committed sequences without transaction debris. |
+| T5 | 2026-08-24 | Source and installed shipped files under the outer cleanup supervisor | Pass | Help, completion, installation, documentation, M1-M5 regression, successful cleanup, and forced-failure cleanup behavior passed. |
 
 ##### Closure Evidence
 
-- None; implementation has not started.
+- `bash tests/test-tmux-runner.bash`: 28 milestone checks and the outer
+  supervisor cleanup check passed through the shipped runner, real tmux,
+  Git, PTYs, filesystem, and temporary XDG paths.
+- `bash -n`, ShellCheck, and `git diff --check` passed for all changed shell,
+  test, and documentation paths.
+- The third-person review reproduced the three-client same-sequence
+  acknowledgment race and accepted the retained-ticket correction after the
+  full shipped suite passed with no transaction debris.
+- The M7 register update records the M6 second-person acceptance and carrying
+  commit.
 
 #### M7 - Complete integrated verification and release preparation
 

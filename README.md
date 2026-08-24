@@ -35,9 +35,18 @@ directories and files without following directory symlinks, and asks real Git
 to validate each physical working-tree top level. Canonical results are
 deduplicated and sorted before labels or selection numbers are assigned.
 
+Successful session entry updates local navigation state below
+`${XDG_STATE_HOME:-$HOME/.local/state}/tmux-runner`. Path-marked sessions
+contribute canonical paths to a 20-entry most-recently-used list. Every
+entered runner session, including an unmarked session selected by `ls` or
+direct attachment, contributes its exact name to the previous-session pair.
+State updates use a five-second directory lock, complete-file replacement,
+and an attach acknowledgment queued by tmux after outside-client handoff.
+
 ## Requirements
 
-Session commands require Bash 4 or later and tmux. `create` also requires Git
+Session commands require Bash 4 or later, tmux, `flock`, `mktemp`, `mkdir`,
+`chmod`, `mv`, `ln`, `rm`, and `sleep`. `create` also requires Git
 to distinguish working trees from ordinary directories. An automatic
 `create` requires `hostname`; `sha256sum` is required when parent components
 cannot produce an available distinct name, including normalized path
@@ -53,6 +62,14 @@ installation:
 ```bash
 command -v bash
 command -v tmux
+command -v flock
+command -v mktemp
+command -v mkdir
+command -v chmod
+command -v mv
+command -v ln
+command -v rm
+command -v sleep
 command -v hostname
 command -v sha256sum
 command -v find
@@ -72,6 +89,8 @@ make --version
 | --- | --- |
 | `create`, `c` | Create or reuse a session and enter it immediately. |
 | `repo` | Discover configured repositories, select one, and enter it. |
+| `recent` | Select and enter a valid recent path-marked destination. |
+| `last` | Enter the previous distinct runner session. |
 | `ls` | List sessions, select one by number, and enter it. |
 | `attach`, `a` | Enter an existing session by exact name. |
 
@@ -166,6 +185,52 @@ immediately before any tmux change.
 `tmux-runner ls` remains a selector for current sessions only; it does not show
 repository catalog entries.
 
+## Local Navigation State
+
+List valid recent destinations, choose one by number, and create or reuse its
+path-matched session:
+
+```text
+tmux-runner recent
+```
+
+Enter the previous distinct runner session:
+
+```text
+tmux-runner last
+```
+
+After sessions A and B have been entered, `last` enters A. The successful
+entry makes A current and B previous, so the next `last` enters B. Repeated
+calls therefore alternate between the two most recently entered distinct
+sessions without creating a session. If the previous session no longer
+exists, `last` reports its exact name and leaves navigation state unchanged.
+
+`recent` records only sessions carrying `@tmux-runner-path`. Direct
+attachment and `ls` selection of an unmarked session still update `last` but
+do not add a path to `recent`. The state keeps exactly the newest 20 distinct
+canonical paths in most-recent-first order. Missing paths and paths whose
+physical or Git identity changed are skipped. A selected path is checked
+again immediately before any tmux change.
+
+The state directory is
+`${XDG_STATE_HOME:-$HOME/.local/state}/tmux-runner`, mode `0700`. The main
+`state` record and transaction records use mode `0600`. Fields are literal,
+versioned text; percent, carriage return, tab, and newline bytes are encoded
+as `%25`, `%0D`, `%09`, and `%0A`. State is parsed as data and is never
+sourced or evaluated by a shell.
+
+Updates lock the state directory inode for at most five seconds and replace
+the complete main record atomically. Outside tmux, the runner stages one
+pending event immediately before attachment and queues a non-background
+`run-shell` acknowledgment after `attach-session` in the same tmux command
+queue. The parent commits as soon as that acknowledgment appears, even while
+the client remains attached. A later server or client failure does not erase
+an acknowledged entry. The next state access commits an acknowledged orphan
+or removes only an unacknowledged orphan; it never restores an older state
+snapshot over a concurrent success. An unsupported state version fails
+without changing the record or contacting tmux.
+
 ## Help
 
 Show the complete command summary or help for one command:
@@ -175,6 +240,8 @@ tmux-runner --help
 tmux-runner --version
 tmux-runner create --help
 tmux-runner repo --help
+tmux-runner recent --help
+tmux-runner last --help
 tmux-runner ls --help
 tmux-runner attach --help
 ```
@@ -209,8 +276,8 @@ deployment identity when it is executed outside the repository.
 
 The completion file supplies commands, `-h` and `--help`, command options,
 directories after `-c`, and live session names for `attach` and `a`. It also
-supplies the help options for `repo`. Session lookup always uses the dedicated
-`tmux-runner` server.
+supplies the help options for `repo`, `recent`, `last`, and `ls`. Session
+lookup always uses the dedicated `tmux-runner` server.
 
 ## Installation
 
@@ -257,6 +324,10 @@ printf '%s\n' "$repository_root" > "${XDG_CONFIG_HOME:-$HOME/.config}/tmux-runne
 tmux-runner repo
 ```
 
+Installation does not create navigation state. The first session command
+creates the state directory in the selected XDG state home; a successful
+session entry creates or updates the main state record.
+
 A different test home and its config path can be supplied with
 `make HOME="/path/to/home" XDG_CONFIG_HOME="/path/to/home/.config" install`.
 Inspect the same action without writing files with
@@ -278,6 +349,10 @@ enters the existing path-matched session. To return to the original shell
 first, press `Ctrl-b`, release the keys, and then press `d` to detach from tmux.
 Use the same detach sequence before running a `tmux-runner` session command
 from a client connected to the default or any other tmux server.
+
+After entering another runner session, use `tmux-runner last` to return to the
+previous one. Use `tmux-runner recent` when the destination path remains but
+its earlier tmux session has ended.
 
 ## Verification
 

@@ -20,6 +20,28 @@ FIND_BIN=$(type -P find || true)
 readonly FIND_BIN
 SORT_BIN=$(type -P sort || true)
 readonly SORT_BIN
+FLOCK_BIN=$(type -P flock || true)
+readonly FLOCK_BIN
+MKTEMP_BIN=$(type -P mktemp || true)
+readonly MKTEMP_BIN
+MKDIR_BIN=$(type -P mkdir || true)
+readonly MKDIR_BIN
+CHMOD_BIN=$(type -P chmod || true)
+readonly CHMOD_BIN
+MV_BIN=$(type -P mv || true)
+readonly MV_BIN
+LN_BIN=$(type -P ln || true)
+readonly LN_BIN
+RM_BIN=$(type -P rm || true)
+readonly RM_BIN
+SLEEP_BIN=$(type -P sleep || true)
+readonly SLEEP_BIN
+readonly STATE_VERSION=1
+readonly STATE_RECENT_LIMIT=20
+readonly STATE_LOCK_TIMEOUT=5
+readonly STATE_ACK_WAIT_TIMEOUT=5
+readonly STATE_SEQUENCE_MAX=999999999999999999
+readonly SESSION_PATH_MARKER_PREFIX="v1:"
 MANAGED_SESSION_NAMES=()
 MANAGED_SESSION_PATHS=()
 PATH_MATCHES=()
@@ -28,12 +50,40 @@ CATALOG_PATHS=()
 CATALOG_LABELS=()
 CATALOG_DEPTHS=()
 CATALOG_DUPLICATES=()
+STATE_DIRECTORY=""
+STATE_FILE=""
+STATE_LOCK_FD=""
+STATE_EVENT_FD=""
+STATE_PENDING_FILE=""
+STATE_ACK_FILE=""
+STATE_TRANSACTION_ID=""
+STATE_EVENT_SEQUENCE=0
+STATE_EVENT_SESSION_NAME=""
+STATE_EVENT_SESSION_PATH=""
+STATE_SEQUENCE=0
+STATE_SESSION_NAMES=()
+STATE_SESSION_SEQUENCES=()
+STATE_RECENT_PATHS=()
+STATE_RECENT_SEQUENCES=()
+STATE_ENCODED=""
+STATE_DECODED=""
+STATE_PARSED_SEQUENCE=0
+STATE_SHELL_QUOTED=""
+STATE_ACK_COMMAND=""
+SESSION_PATH_MARKER=""
+SESSION_PATH_VALUE=""
+PENDING_EVENT_SEQUENCE=0
+PENDING_STAGE_SEQUENCE=0
+PENDING_SESSION_NAME=""
+PENDING_SESSION_PATH=""
 
 function print_usage {
     printf 'Usage:\n'
     printf '  %s create [-s <session-name>] [-c <folder>]\n' "$PROGRAM_NAME"
     printf '  %s c [-s <session-name>] [-c <folder>]\n' "$PROGRAM_NAME"
     printf '  %s repo\n' "$PROGRAM_NAME"
+    printf '  %s recent\n' "$PROGRAM_NAME"
+    printf '  %s last\n' "$PROGRAM_NAME"
     printf '  %s ls\n' "$PROGRAM_NAME"
     printf '  %s attach -t <session-name>\n' "$PROGRAM_NAME"
     printf '  %s attach <session-name>\n' "$PROGRAM_NAME"
@@ -44,6 +94,8 @@ function print_usage {
     printf '\nCommands:\n'
     printf '  create, c  Create or reuse a session and enter it.\n'
     printf '  repo       Discover repositories, select one, and enter it.\n'
+    printf '  recent     Select a recent path-marked destination.\n'
+    printf '  last       Enter the previous distinct runner session.\n'
     printf '  ls         List sessions, select one by number, and enter it.\n'
     printf '  attach, a  Enter an existing session by name.\n'
     printf '\nOptions:\n'
@@ -158,6 +210,26 @@ function print_repo_help {
     printf '  Add one literal absolute search root per line.\n'
 }
 
+function print_recent_help {
+    printf 'Usage: %s recent\n' "$PROGRAM_NAME"
+    printf '\nList valid recent path-marked destinations, select one by number, and enter it.\n'
+    printf '\nOptions:\n'
+    printf '  -h, --help  Show this help and exit.\n'
+    printf '\nState:\n'
+    # The help text documents the shell fallback expression literally.
+    # shellcheck disable=SC2016
+    printf '  ${XDG_STATE_HOME:-$HOME/.local/state}/tmux-runner/state\n'
+    printf '  Stores the newest 20 distinct canonical paths.\n'
+}
+
+function print_last_help {
+    printf 'Usage: %s last\n' "$PROGRAM_NAME"
+    printf '\nEnter the previous distinct session reached through tmux-runner.\n'
+    printf 'Repeated calls alternate between the two latest distinct sessions.\n'
+    printf '\nOptions:\n'
+    printf '  -h, --help  Show this help and exit.\n'
+}
+
 function print_attach_usage {
     local command_name="$1"
 
@@ -205,6 +277,1079 @@ function fail_attach_usage {
     return 2
 }
 
+function runner_state_directory {
+    local state_home="${XDG_STATE_HOME:-${HOME}/.local/state}"
+
+    printf '%s/tmux-runner\n' "$state_home"
+}
+
+function require_state_dependencies {
+    local index=0
+    local -a names=(flock mktemp mkdir chmod mv ln rm sleep)
+    local -a paths=(
+        "$FLOCK_BIN" "$MKTEMP_BIN" "$MKDIR_BIN" "$CHMOD_BIN"
+        "$MV_BIN" "$LN_BIN" "$RM_BIN" "$SLEEP_BIN"
+    )
+
+    for index in "${!names[@]}"; do
+        if [[ -z "${paths[$index]}" ]] || [[ ! -x "${paths[$index]}" ]]; then
+            fail "${names[$index]} is not available in PATH"
+            return
+        fi
+    done
+}
+
+function ensure_state_directory {
+    local saved_umask=""
+
+    STATE_DIRECTORY=$(runner_state_directory)
+    STATE_FILE="$STATE_DIRECTORY/state"
+    if [[ -L "$STATE_DIRECTORY" ]]; then
+        fail "state directory must not be a symbolic link: $STATE_DIRECTORY"
+        return
+    fi
+    if [[ -e "$STATE_DIRECTORY" ]] && [[ ! -d "$STATE_DIRECTORY" ]]; then
+        fail "state path is not a directory: $STATE_DIRECTORY"
+        return
+    fi
+
+    saved_umask=$(umask)
+    umask 077
+    if ! "$MKDIR_BIN" -p -- "$STATE_DIRECTORY"; then
+        umask "$saved_umask"
+        fail "cannot create state directory: $STATE_DIRECTORY"
+        return
+    fi
+    umask "$saved_umask"
+    if [[ ! -O "$STATE_DIRECTORY" ]]; then
+        fail "state directory is not owned by the current user: $STATE_DIRECTORY"
+        return
+    fi
+    if ! "$CHMOD_BIN" 0700 -- "$STATE_DIRECTORY"; then
+        fail "cannot set state directory mode: $STATE_DIRECTORY"
+        return
+    fi
+}
+
+function acquire_state_lock {
+    if [[ -z "$STATE_LOCK_FD" ]]; then
+        if ! exec {STATE_LOCK_FD}<"$STATE_DIRECTORY"; then
+            fail "cannot open state directory for locking: $STATE_DIRECTORY"
+            return
+        fi
+    fi
+    if ! "$FLOCK_BIN" -x -w "$STATE_LOCK_TIMEOUT" "$STATE_LOCK_FD"; then
+        fail "state lock timed out after ${STATE_LOCK_TIMEOUT} seconds"
+        return
+    fi
+}
+
+function release_state_lock {
+    if [[ -n "$STATE_LOCK_FD" ]]; then
+        "$FLOCK_BIN" -u "$STATE_LOCK_FD" 2>/dev/null || true
+        exec {STATE_LOCK_FD}>&-
+        STATE_LOCK_FD=""
+    fi
+}
+
+function state_encode_field {
+    local value="$1"
+
+    value="${value//%/%25}"
+    value="${value//$'\r'/%0D}"
+    value="${value//$'\t'/%09}"
+    value="${value//$'\n'/%0A}"
+    STATE_ENCODED="$value"
+}
+
+function state_decode_field {
+    local encoded="$1"
+    local decoded=""
+    local character=""
+
+    while [[ -n "$encoded" ]]; do
+        case "$encoded" in
+            %25*)
+                decoded="${decoded}%"
+                encoded="${encoded:3}"
+                ;;
+            %09*)
+                decoded="${decoded}"$'\t'
+                encoded="${encoded:3}"
+                ;;
+            %0D*)
+                decoded="${decoded}"$'\r'
+                encoded="${encoded:3}"
+                ;;
+            %0A*)
+                decoded="${decoded}"$'\n'
+                encoded="${encoded:3}"
+                ;;
+            %*)
+                return 1
+                ;;
+            *)
+                character="${encoded:0:1}"
+                decoded="${decoded}${character}"
+                encoded="${encoded:1}"
+                ;;
+        esac
+    done
+    STATE_DECODED="$decoded"
+}
+
+function encode_session_path_marker {
+    state_encode_field "$1"
+    SESSION_PATH_MARKER="${SESSION_PATH_MARKER_PREFIX}${STATE_ENCODED}"
+}
+
+function parse_state_sequence {
+    local value="$1"
+
+    if [[ ! "$value" =~ ^[0-9]+$ ]]; then
+        return 1
+    fi
+    while [[ "${#value}" -gt 1 ]] && [[ "${value:0:1}" == "0" ]]; do
+        value="${value:1}"
+    done
+    if (( ${#value} > 18 )) || \
+        (( 10#$value > STATE_SEQUENCE_MAX )); then
+        return 1
+    fi
+    STATE_PARSED_SEQUENCE=$((10#$value))
+}
+
+function reset_loaded_state {
+    STATE_SEQUENCE=0
+    STATE_SESSION_NAMES=()
+    STATE_SESSION_SEQUENCES=()
+    STATE_RECENT_PATHS=()
+    STATE_RECENT_SEQUENCES=()
+}
+
+function insert_state_session {
+    local event_sequence="$1"
+    local session_name="$2"
+    local index=0
+    local inserted=0
+    local -a new_names=()
+    local -a new_sequences=()
+
+    for index in "${!STATE_SESSION_NAMES[@]}"; do
+        if [[ "${STATE_SESSION_NAMES[$index]}" == "$session_name" ]] && \
+            (( STATE_SESSION_SEQUENCES[index] >= event_sequence )); then
+            return 0
+        fi
+    done
+    for index in "${!STATE_SESSION_NAMES[@]}"; do
+        if [[ "${STATE_SESSION_NAMES[$index]}" == "$session_name" ]]; then
+            continue
+        fi
+        if (( ! inserted )) && \
+            (( event_sequence > STATE_SESSION_SEQUENCES[index] )); then
+            new_names+=("$session_name")
+            new_sequences+=("$event_sequence")
+            inserted=1
+        fi
+        if (( ${#new_names[@]} < 2 )); then
+            new_names+=("${STATE_SESSION_NAMES[$index]}")
+            new_sequences+=("${STATE_SESSION_SEQUENCES[$index]}")
+        fi
+    done
+    if (( ! inserted )) && (( ${#new_names[@]} < 2 )); then
+        new_names+=("$session_name")
+        new_sequences+=("$event_sequence")
+    fi
+    STATE_SESSION_NAMES=("${new_names[@]}")
+    STATE_SESSION_SEQUENCES=("${new_sequences[@]}")
+}
+
+function insert_state_recent {
+    local event_sequence="$1"
+    local canonical_path="$2"
+    local index=0
+    local inserted=0
+    local -a new_paths=()
+    local -a new_sequences=()
+
+    for index in "${!STATE_RECENT_PATHS[@]}"; do
+        if [[ "${STATE_RECENT_PATHS[$index]}" == "$canonical_path" ]] && \
+            (( STATE_RECENT_SEQUENCES[index] >= event_sequence )); then
+            return 0
+        fi
+    done
+    for index in "${!STATE_RECENT_PATHS[@]}"; do
+        if [[ "${STATE_RECENT_PATHS[$index]}" == "$canonical_path" ]]; then
+            continue
+        fi
+        if (( ! inserted )) && \
+            (( event_sequence > STATE_RECENT_SEQUENCES[index] )); then
+            new_paths+=("$canonical_path")
+            new_sequences+=("$event_sequence")
+            inserted=1
+        fi
+        if (( ${#new_paths[@]} < STATE_RECENT_LIMIT )); then
+            new_paths+=("${STATE_RECENT_PATHS[$index]}")
+            new_sequences+=("${STATE_RECENT_SEQUENCES[$index]}")
+        fi
+    done
+    if (( ! inserted )) && (( ${#new_paths[@]} < STATE_RECENT_LIMIT )); then
+        new_paths+=("$canonical_path")
+        new_sequences+=("$event_sequence")
+    fi
+    STATE_RECENT_PATHS=("${new_paths[@]}")
+    STATE_RECENT_SEQUENCES=("${new_sequences[@]}")
+}
+
+function load_state_locked {
+    local line=""
+    local record_type=""
+    local remainder=""
+    local sequence_text=""
+    local encoded_value=""
+    local version_value=""
+    local version_count=0
+    local event_sequence=0
+    local -a lines=()
+
+    reset_loaded_state
+    if [[ ! -e "$STATE_FILE" ]]; then
+        return 0
+    fi
+    if [[ -L "$STATE_FILE" ]] || [[ ! -f "$STATE_FILE" ]] || \
+        [[ ! -r "$STATE_FILE" ]]; then
+        return 3
+    fi
+    mapfile -t lines < "$STATE_FILE"
+    for line in "${lines[@]}"; do
+        if [[ "$line" == version$'\t'* ]]; then
+            version_value="${line#*$'\t'}"
+            version_count=$((version_count + 1))
+        fi
+    done
+    if (( version_count != 1 )) || [[ "$version_value" != "$STATE_VERSION" ]]; then
+        reset_loaded_state
+        return 3
+    fi
+
+    for line in "${lines[@]}"; do
+        if [[ "$line" != *$'\t'* ]]; then
+            continue
+        fi
+        record_type="${line%%$'\t'*}"
+        remainder="${line#*$'\t'}"
+        case "$record_type" in
+            sequence)
+                if [[ "$remainder" == *$'\t'* ]] || \
+                    ! parse_state_sequence "$remainder"; then
+                    continue
+                fi
+                if (( STATE_PARSED_SEQUENCE > STATE_SEQUENCE )); then
+                    STATE_SEQUENCE=$STATE_PARSED_SEQUENCE
+                fi
+                ;;
+            session|recent)
+                if [[ "$remainder" != *$'\t'* ]]; then
+                    continue
+                fi
+                sequence_text="${remainder%%$'\t'*}"
+                encoded_value="${remainder#*$'\t'}"
+                if ! parse_state_sequence "$sequence_text"; then
+                    continue
+                fi
+                event_sequence=$STATE_PARSED_SEQUENCE
+                if ! state_decode_field "$encoded_value"; then
+                    continue
+                fi
+                if [[ -z "$STATE_DECODED" ]]; then
+                    continue
+                fi
+                if [[ "$record_type" == "session" ]]; then
+                    insert_state_session "$event_sequence" "$STATE_DECODED"
+                elif [[ "$STATE_DECODED" == /* ]]; then
+                    insert_state_recent "$event_sequence" "$STATE_DECODED"
+                fi
+                if (( event_sequence > STATE_SEQUENCE )); then
+                    STATE_SEQUENCE=$event_sequence
+                fi
+                ;;
+        esac
+    done
+}
+
+function write_state_locked {
+    local temporary_file=""
+    local index=0
+
+    if ! temporary_file=$("$MKTEMP_BIN" \
+        "$STATE_DIRECTORY/.state.tmp.XXXXXXXXXX"); then
+        fail "cannot create a temporary state record"
+        return
+    fi
+    if ! "$CHMOD_BIN" 0600 -- "$temporary_file"; then
+        "$RM_BIN" -f -- "$temporary_file"
+        fail "cannot set temporary state record mode"
+        return
+    fi
+    if ! {
+        printf 'version\t%s\n' "$STATE_VERSION"
+        printf 'sequence\t%d\n' "$STATE_SEQUENCE"
+        for index in "${!STATE_SESSION_NAMES[@]}"; do
+            state_encode_field "${STATE_SESSION_NAMES[$index]}"
+            printf 'session\t%d\t%s\n' \
+                "${STATE_SESSION_SEQUENCES[$index]}" "$STATE_ENCODED"
+        done
+        for index in "${!STATE_RECENT_PATHS[@]}"; do
+            state_encode_field "${STATE_RECENT_PATHS[$index]}"
+            printf 'recent\t%d\t%s\n' \
+                "${STATE_RECENT_SEQUENCES[$index]}" "$STATE_ENCODED"
+        done
+    } > "$temporary_file"; then
+        "$RM_BIN" -f -- "$temporary_file"
+        fail "cannot write temporary state record"
+        return
+    fi
+    if ! "$MV_BIN" -f -- "$temporary_file" "$STATE_FILE"; then
+        "$RM_BIN" -f -- "$temporary_file"
+        fail "cannot replace state record"
+        return
+    fi
+}
+
+function parse_pending_record {
+    local pending_file="$1"
+    local expected_transaction="$2"
+    local line=""
+    local record_type=""
+    local value=""
+    local version_value=""
+    local transaction_value=""
+    local sequence_value=""
+    local session_value=""
+    local path_value=""
+    local version_count=0
+    local transaction_count=0
+    local sequence_count=0
+    local session_count=0
+    local path_count=0
+    local -a lines=()
+
+    PENDING_STAGE_SEQUENCE=0
+    PENDING_SESSION_NAME=""
+    PENDING_SESSION_PATH=""
+    if [[ -L "$pending_file" ]] || [[ ! -f "$pending_file" ]] || \
+        [[ ! -r "$pending_file" ]]; then
+        return 1
+    fi
+    mapfile -t lines < "$pending_file"
+    for line in "${lines[@]}"; do
+        if [[ "$line" != *$'\t'* ]]; then
+            continue
+        fi
+        record_type="${line%%$'\t'*}"
+        value="${line#*$'\t'}"
+        case "$record_type" in
+            version)
+                version_value="$value"
+                version_count=$((version_count + 1))
+                ;;
+            transaction)
+                transaction_value="$value"
+                transaction_count=$((transaction_count + 1))
+                ;;
+            sequence)
+                sequence_value="$value"
+                sequence_count=$((sequence_count + 1))
+                ;;
+            session)
+                session_value="$value"
+                session_count=$((session_count + 1))
+                ;;
+            path)
+                path_value="$value"
+                path_count=$((path_count + 1))
+                ;;
+        esac
+    done
+    if (( version_count != 1 || transaction_count != 1 || \
+        sequence_count != 1 || session_count != 1 || path_count != 1 )); then
+        return 1
+    fi
+    if [[ "$version_value" != "$STATE_VERSION" ]] || \
+        [[ "$transaction_value" != "$expected_transaction" ]] || \
+        [[ ! "$transaction_value" =~ ^[A-Za-z0-9_-]+$ ]] || \
+        ! parse_state_sequence "$sequence_value"; then
+        return 1
+    fi
+    PENDING_STAGE_SEQUENCE=$STATE_PARSED_SEQUENCE
+    if ! state_decode_field "$session_value" || [[ -z "$STATE_DECODED" ]]; then
+        return 1
+    fi
+    PENDING_SESSION_NAME="$STATE_DECODED"
+    if ! state_decode_field "$path_value"; then
+        return 1
+    fi
+    if [[ -n "$STATE_DECODED" ]] && [[ "$STATE_DECODED" != /* ]]; then
+        return 1
+    fi
+    PENDING_SESSION_PATH="$STATE_DECODED"
+}
+
+function parse_ack_record {
+    local ack_file="$1"
+    local expected_transaction="$2"
+    local line=""
+    local record_type=""
+    local value=""
+    local version_value=""
+    local transaction_value=""
+    local sequence_value=""
+    local version_count=0
+    local transaction_count=0
+    local sequence_count=0
+    local -a lines=()
+
+    PENDING_EVENT_SEQUENCE=0
+    if [[ -L "$ack_file" ]] || [[ ! -f "$ack_file" ]] || \
+        [[ ! -r "$ack_file" ]]; then
+        return 1
+    fi
+    mapfile -t lines < "$ack_file"
+    for line in "${lines[@]}"; do
+        if [[ "$line" != *$'\t'* ]]; then
+            continue
+        fi
+        record_type="${line%%$'\t'*}"
+        value="${line#*$'\t'}"
+        case "$record_type" in
+            version)
+                version_value="$value"
+                version_count=$((version_count + 1))
+                ;;
+            transaction)
+                transaction_value="$value"
+                transaction_count=$((transaction_count + 1))
+                ;;
+            sequence)
+                sequence_value="$value"
+                sequence_count=$((sequence_count + 1))
+                ;;
+        esac
+    done
+    if (( version_count != 1 || transaction_count != 1 || \
+        sequence_count != 1 )); then
+        return 1
+    fi
+    if [[ "$version_value" != "$STATE_VERSION" ]] || \
+        { [[ -n "$expected_transaction" ]] && \
+            [[ "$transaction_value" != "$expected_transaction" ]]; } || \
+        [[ ! "$transaction_value" =~ ^[A-Za-z0-9_-]+$ ]] || \
+        ! parse_state_sequence "$sequence_value"; then
+        return 1
+    fi
+    PENDING_EVENT_SEQUENCE=$STATE_PARSED_SEQUENCE
+}
+
+function transaction_is_active {
+    local transaction_id="$1"
+    local pending_file="$STATE_DIRECTORY/pending.$transaction_id"
+    local pending_fd=""
+
+    if [[ ! -f "$pending_file" ]] || [[ -L "$pending_file" ]] || \
+        ! exec {pending_fd}<"$pending_file"; then
+        return 1
+    fi
+    if "$FLOCK_BIN" -x -n "$pending_fd"; then
+        "$FLOCK_BIN" -u "$pending_fd"
+        exec {pending_fd}>&-
+        return 1
+    fi
+    exec {pending_fd}>&-
+    return 0
+}
+
+function remove_transaction_ack_work_files {
+    local transaction_id="$1"
+    local nullglob_was_set=0
+    local -a temporary_files=()
+
+    if shopt -q nullglob; then
+        nullglob_was_set=1
+    fi
+    shopt -s nullglob
+    temporary_files=("$STATE_DIRECTORY"/.ack.tmp."$transaction_id".*)
+    if (( ${#temporary_files[@]} > 0 )); then
+        "$RM_BIN" -f -- "${temporary_files[@]}"
+    fi
+    if (( ! nullglob_was_set )); then
+        shopt -u nullglob
+    fi
+}
+
+function cleanup_ack_work_files_locked {
+    local work_file=""
+    local basename=""
+    local transaction_id=""
+    local pending_file=""
+    local has_active_transaction=0
+    local nullglob_was_set=0
+    local -a temporary_files=()
+    local -a ticket_files=()
+    local -a pending_files=()
+
+    if shopt -q nullglob; then
+        nullglob_was_set=1
+    fi
+    shopt -s nullglob
+    temporary_files=("$STATE_DIRECTORY"/.ack.tmp.*)
+    for work_file in "${temporary_files[@]}"; do
+        basename="${work_file##*/.ack.tmp.}"
+        transaction_id="${basename%%.*}"
+        if [[ ! "$transaction_id" =~ ^[A-Za-z0-9_-]+$ ]] || \
+            ! transaction_is_active "$transaction_id"; then
+            "$RM_BIN" -f -- "$work_file"
+        fi
+    done
+    pending_files=("$STATE_DIRECTORY"/pending.*)
+    for pending_file in "${pending_files[@]}"; do
+        transaction_id="${pending_file##*/pending.}"
+        if transaction_is_active "$transaction_id"; then
+            has_active_transaction=1
+            break
+        fi
+    done
+    if (( ! has_active_transaction )); then
+        ticket_files=("$STATE_DIRECTORY"/.ack.ticket.*)
+        if (( ${#ticket_files[@]} > 0 )); then
+            "$RM_BIN" -f -- "${ticket_files[@]}"
+        fi
+    fi
+    if (( ! nullglob_was_set )); then
+        shopt -u nullglob
+    fi
+}
+
+function apply_pending_event_locked {
+    if (( PENDING_EVENT_SEQUENCE > STATE_SEQUENCE )); then
+        STATE_SEQUENCE=$PENDING_EVENT_SEQUENCE
+    fi
+    insert_state_session "$PENDING_EVENT_SEQUENCE" "$PENDING_SESSION_NAME"
+    if [[ -n "$PENDING_SESSION_PATH" ]]; then
+        insert_state_recent "$PENDING_EVENT_SEQUENCE" \
+            "$PENDING_SESSION_PATH"
+    fi
+    write_state_locked
+}
+
+function reconcile_orphan_transactions_locked {
+    local pending_file=""
+    local ack_file=""
+    local transaction_id=""
+    local pending_fd=""
+    local nullglob_was_set=0
+    local -a pending_files=()
+    local -a ack_files=()
+    local -a temporary_files=()
+
+    if shopt -q nullglob; then
+        nullglob_was_set=1
+    fi
+    shopt -s nullglob
+    temporary_files=(
+        "$STATE_DIRECTORY"/.state.tmp.*
+        "$STATE_DIRECTORY"/.pending.*
+    )
+    if (( ${#temporary_files[@]} > 0 )); then
+        "$RM_BIN" -f -- "${temporary_files[@]}"
+    fi
+    pending_files=("$STATE_DIRECTORY"/pending.*)
+    for pending_file in "${pending_files[@]}"; do
+        transaction_id="${pending_file##*/pending.}"
+        ack_file="$STATE_DIRECTORY/ack.$transaction_id"
+        pending_fd=""
+        if ! exec {pending_fd}<"$pending_file"; then
+            continue
+        fi
+        if "$FLOCK_BIN" -x -n "$pending_fd"; then
+            if parse_pending_record "$pending_file" "$transaction_id" && \
+                parse_ack_record "$ack_file" "$transaction_id"; then
+                if ! apply_pending_event_locked; then
+                    "$FLOCK_BIN" -u "$pending_fd"
+                    exec {pending_fd}>&-
+                    if (( ! nullglob_was_set )); then
+                        shopt -u nullglob
+                    fi
+                    return 1
+                fi
+                remove_transaction_ack_work_files "$transaction_id"
+            else
+                remove_transaction_ack_work_files "$transaction_id"
+            fi
+            "$RM_BIN" -f -- "$pending_file" "$ack_file"
+            "$FLOCK_BIN" -u "$pending_fd"
+        fi
+        exec {pending_fd}>&-
+    done
+
+    ack_files=("$STATE_DIRECTORY"/ack.*)
+    for ack_file in "${ack_files[@]}"; do
+        transaction_id="${ack_file##*/ack.}"
+        pending_file="$STATE_DIRECTORY/pending.$transaction_id"
+        if [[ ! -e "$pending_file" ]]; then
+            "$RM_BIN" -f -- "$ack_file"
+        fi
+    done
+    cleanup_ack_work_files_locked
+    if (( ! nullglob_was_set )); then
+        shopt -u nullglob
+    fi
+}
+
+function load_state_access {
+    local load_rc=0
+
+    acquire_state_lock || return
+    load_state_locked || load_rc=$?
+    if (( load_rc == 3 )); then
+        release_state_lock
+        fail "state version is incompatible or unreadable: $STATE_FILE"
+        return
+    fi
+    if (( load_rc != 0 )); then
+        release_state_lock
+        return "$load_rc"
+    fi
+    if ! reconcile_orphan_transactions_locked; then
+        release_state_lock
+        return 1
+    fi
+    release_state_lock
+}
+
+function initialize_state_runtime {
+    require_state_dependencies || return
+    ensure_state_directory || return
+    load_state_access
+}
+
+function next_event_sequence_locked {
+    local pending_file=""
+    local ack_file=""
+    local transaction_id=""
+    local maximum_sequence="$STATE_SEQUENCE"
+    local nullglob_was_set=0
+    local -a pending_files=()
+    local -a ack_files=()
+    local -a ticket_files=()
+
+    if shopt -q nullglob; then
+        nullglob_was_set=1
+    fi
+    shopt -s nullglob
+    pending_files=("$STATE_DIRECTORY"/pending.*)
+    for pending_file in "${pending_files[@]}"; do
+        transaction_id="${pending_file##*/pending.}"
+        if parse_pending_record "$pending_file" "$transaction_id" && \
+            (( PENDING_STAGE_SEQUENCE > maximum_sequence )); then
+            maximum_sequence=$PENDING_STAGE_SEQUENCE
+        fi
+    done
+    ack_files=("$STATE_DIRECTORY"/ack.*)
+    for ack_file in "${ack_files[@]}"; do
+        transaction_id="${ack_file##*/ack.}"
+        if parse_ack_record "$ack_file" "$transaction_id" && \
+            (( PENDING_EVENT_SEQUENCE > maximum_sequence )); then
+            maximum_sequence=$PENDING_EVENT_SEQUENCE
+        fi
+    done
+    ticket_files=("$STATE_DIRECTORY"/.ack.ticket.*)
+    for ack_file in "${ticket_files[@]}"; do
+        if parse_ack_record "$ack_file" "" && \
+            (( PENDING_EVENT_SEQUENCE > maximum_sequence )); then
+            maximum_sequence=$PENDING_EVENT_SEQUENCE
+        fi
+    done
+    if (( ! nullglob_was_set )); then
+        shopt -u nullglob
+    fi
+    if (( maximum_sequence >= STATE_SEQUENCE_MAX )); then
+        fail "state sequence is exhausted"
+        return
+    fi
+    STATE_EVENT_SEQUENCE=$((maximum_sequence + 1))
+}
+
+function write_ack_record {
+    local transaction_id="$1"
+    local ack_file="$STATE_DIRECTORY/ack.$transaction_id"
+    local temporary_file=""
+    local ticket_file=""
+    local load_rc=0
+    local attempts=0
+
+    if [[ -e "$ack_file" ]]; then
+        if parse_ack_record "$ack_file" "$transaction_id"; then
+            STATE_ACK_FILE="$ack_file"
+            return 0
+        fi
+        fail "state acknowledgment is malformed: $ack_file"
+        return
+    fi
+    while (( attempts < 100 )); do
+        attempts=$((attempts + 1))
+        load_rc=0
+        load_state_locked || load_rc=$?
+        if (( load_rc != 0 )); then
+            fail "cannot read state while creating an acknowledgment"
+            return 1
+        fi
+        next_event_sequence_locked || return
+        if ! temporary_file=$("$MKTEMP_BIN" \
+            "$STATE_DIRECTORY/.ack.tmp.$transaction_id.XXXXXXXXXX"); then
+            fail "cannot create a temporary state acknowledgment"
+            return
+        fi
+        if ! {
+            printf 'version\t%s\n' "$STATE_VERSION"
+            printf 'transaction\t%s\n' "$transaction_id"
+            printf 'sequence\t%d\n' "$STATE_EVENT_SEQUENCE"
+        } > "$temporary_file" || \
+            ! "$CHMOD_BIN" 0600 -- "$temporary_file"; then
+            "$RM_BIN" -f -- "$temporary_file"
+            fail "cannot write a state acknowledgment"
+            return
+        fi
+        ticket_file="$STATE_DIRECTORY/.ack.ticket.$STATE_EVENT_SEQUENCE"
+        if ! "$LN_BIN" -- "$temporary_file" "$ticket_file"; then
+            "$RM_BIN" -f -- "$temporary_file"
+            if [[ -e "$ticket_file" ]] && \
+                ! parse_ack_record "$ticket_file" ""; then
+                "$RM_BIN" -f -- "$ticket_file"
+            fi
+            continue
+        fi
+        if "$LN_BIN" -- "$temporary_file" "$ack_file"; then
+            "$RM_BIN" -f -- "$temporary_file"
+            STATE_ACK_FILE="$ack_file"
+            return 0
+        fi
+        "$RM_BIN" -f -- "$temporary_file"
+        if parse_ack_record "$ack_file" "$transaction_id"; then
+            STATE_ACK_FILE="$ack_file"
+            return 0
+        fi
+        fail "cannot publish a state acknowledgment"
+        return
+    done
+    fail "cannot allocate a state acknowledgment sequence"
+    return 1
+}
+
+function stage_state_event {
+    local session_name="$1"
+    local session_path="$2"
+    local temporary_file=""
+    local transaction_id=""
+    local pending_file=""
+    local ack_file=""
+    local encoded_session=""
+    local encoded_path=""
+    local load_rc=0
+    local attempts=0
+    local published=0
+
+    acquire_state_lock || return
+    load_state_locked || load_rc=$?
+    if (( load_rc == 3 )); then
+        release_state_lock
+        fail "state version is incompatible or unreadable: $STATE_FILE"
+        return
+    fi
+    if (( load_rc != 0 )); then
+        release_state_lock
+        return "$load_rc"
+    fi
+    if ! reconcile_orphan_transactions_locked || \
+        ! next_event_sequence_locked; then
+        release_state_lock
+        return 1
+    fi
+    while (( attempts < 100 )); do
+        attempts=$((attempts + 1))
+        if ! temporary_file=$("$MKTEMP_BIN" \
+            "$STATE_DIRECTORY/.pending.XXXXXXXXXX"); then
+            release_state_lock
+            fail "cannot create a pending state event"
+            return
+        fi
+        transaction_id="${temporary_file##*/.pending.}"
+        pending_file="$STATE_DIRECTORY/pending.$transaction_id"
+        ack_file="$STATE_DIRECTORY/ack.$transaction_id"
+        state_encode_field "$session_name"
+        encoded_session="$STATE_ENCODED"
+        state_encode_field "$session_path"
+        encoded_path="$STATE_ENCODED"
+        if ! {
+            printf 'version\t%s\n' "$STATE_VERSION"
+            printf 'transaction\t%s\n' "$transaction_id"
+            printf 'sequence\t%d\n' "$STATE_EVENT_SEQUENCE"
+            printf 'session\t%s\n' "$encoded_session"
+            printf 'path\t%s\n' "$encoded_path"
+        } > "$temporary_file" || \
+            ! "$CHMOD_BIN" 0600 -- "$temporary_file"; then
+            "$RM_BIN" -f -- "$temporary_file"
+            release_state_lock
+            fail "cannot write a pending state event"
+            return
+        fi
+        if "$LN_BIN" -- "$temporary_file" "$pending_file"; then
+            "$RM_BIN" -f -- "$temporary_file"
+            published=1
+            break
+        fi
+        "$RM_BIN" -f -- "$temporary_file"
+        if [[ ! -e "$pending_file" ]]; then
+            release_state_lock
+            fail "cannot publish a pending state event"
+            return
+        fi
+    done
+    if (( ! published )); then
+        release_state_lock
+        fail "cannot allocate a pending transaction identifier"
+        return
+    fi
+    if ! exec {STATE_EVENT_FD}<"$pending_file" || \
+        ! "$FLOCK_BIN" -s -n "$STATE_EVENT_FD"; then
+        "$RM_BIN" -f -- "$pending_file"
+        if [[ -n "$STATE_EVENT_FD" ]]; then
+            exec {STATE_EVENT_FD}>&-
+        fi
+        STATE_EVENT_FD=""
+        release_state_lock
+        fail "cannot lock a pending state event"
+        return
+    fi
+    STATE_TRANSACTION_ID="$transaction_id"
+    STATE_PENDING_FILE="$pending_file"
+    STATE_ACK_FILE="$ack_file"
+    STATE_EVENT_SESSION_NAME="$session_name"
+    STATE_EVENT_SESSION_PATH="$session_path"
+    release_state_lock
+}
+
+function release_state_event_lock {
+    if [[ -n "$STATE_EVENT_FD" ]]; then
+        "$FLOCK_BIN" -u "$STATE_EVENT_FD" 2>/dev/null || true
+        exec {STATE_EVENT_FD}>&-
+    fi
+    STATE_EVENT_FD=""
+}
+
+function clear_state_event {
+    release_state_event_lock
+    STATE_PENDING_FILE=""
+    STATE_ACK_FILE=""
+    STATE_TRANSACTION_ID=""
+    STATE_EVENT_SEQUENCE=0
+    STATE_EVENT_SESSION_NAME=""
+    STATE_EVENT_SESSION_PATH=""
+}
+
+function discard_state_event {
+    local discard_rc=0
+
+    if [[ -z "$STATE_TRANSACTION_ID" ]]; then
+        return 0
+    fi
+    settle_state_event 0 || discard_rc=$?
+    if (( discard_rc != 0 )); then
+        clear_state_event
+    fi
+    return "$discard_rc"
+}
+
+function recover_released_state_event {
+    local pending_file="$STATE_PENDING_FILE"
+
+    if load_state_access && [[ ! -e "$pending_file" ]]; then
+        clear_state_event
+        return 0
+    fi
+    return 1
+}
+
+function create_state_acknowledgment {
+    parse_pending_record "$STATE_PENDING_FILE" \
+        "$STATE_TRANSACTION_ID" || return
+    write_ack_record "$STATE_TRANSACTION_ID"
+}
+
+function settle_state_event {
+    local acknowledged="$1"
+    local load_rc=0
+    local pending_fd=""
+
+    if (( ! acknowledged )); then
+        release_state_event_lock
+    fi
+
+    acquire_state_lock || return
+    load_state_locked || load_rc=$?
+    if (( load_rc == 3 )); then
+        release_state_lock
+        fail "state version is incompatible or unreadable: $STATE_FILE"
+        return
+    fi
+    if (( load_rc != 0 )); then
+        release_state_lock
+        return "$load_rc"
+    fi
+    if ! reconcile_orphan_transactions_locked; then
+        release_state_lock
+        return 1
+    fi
+    if (( acknowledged )); then
+        if ! parse_pending_record "$STATE_PENDING_FILE" \
+                "$STATE_TRANSACTION_ID" || \
+            ! parse_ack_record "$STATE_ACK_FILE" "$STATE_TRANSACTION_ID" || \
+            ! apply_pending_event_locked; then
+            release_state_lock
+            return 1
+        fi
+        remove_transaction_ack_work_files "$STATE_TRANSACTION_ID"
+        "$RM_BIN" -f -- "$STATE_PENDING_FILE" "$STATE_ACK_FILE"
+        release_state_event_lock
+        cleanup_ack_work_files_locked
+    elif [[ -e "$STATE_PENDING_FILE" ]] && \
+        exec {pending_fd}<"$STATE_PENDING_FILE"; then
+        if "$FLOCK_BIN" -x -n "$pending_fd"; then
+            "$RM_BIN" -f -- "$STATE_PENDING_FILE" "$STATE_ACK_FILE"
+            remove_transaction_ack_work_files "$STATE_TRANSACTION_ID"
+            "$FLOCK_BIN" -u "$pending_fd"
+        fi
+        exec {pending_fd}>&-
+    fi
+    release_state_lock
+    clear_state_event
+}
+
+function quote_posix_shell {
+    local value="$1"
+    local quoted="'"
+    local character=""
+
+    while [[ -n "$value" ]]; do
+        character="${value:0:1}"
+        value="${value:1}"
+        if [[ "$character" == "'" ]]; then
+            quoted="${quoted}'\\''"
+        else
+            quoted="${quoted}${character}"
+        fi
+    done
+    STATE_SHELL_QUOTED="${quoted}'"
+}
+
+function runner_executable_path {
+    local source_path="${BASH_SOURCE[0]}"
+    local source_directory=""
+
+    if [[ "$source_path" != */* ]]; then
+        source_path=$(type -P -- "$source_path" || true)
+    fi
+    if [[ -z "$source_path" ]] || [[ "$source_path" != */* ]]; then
+        return 1
+    fi
+    source_directory="${source_path%/*}"
+    if ! source_directory=$(cd -- "$source_directory" 2>/dev/null && pwd -P); then
+        return 1
+    fi
+    printf '%s/%s\n' "$source_directory" "${source_path##*/}"
+}
+
+function build_state_ack_command {
+    local executable_path=""
+    local quoted_executable=""
+    local quoted_directory=""
+    local quoted_transaction=""
+    local quoted_socket_root=""
+    local socket_root="${TMUX_TMPDIR:-/tmp}"
+
+    if ! executable_path=$(runner_executable_path); then
+        fail "cannot resolve the runner executable for state acknowledgment"
+        return
+    fi
+    quote_posix_shell "$executable_path"
+    quoted_executable="$STATE_SHELL_QUOTED"
+    quote_posix_shell "$STATE_DIRECTORY"
+    quoted_directory="$STATE_SHELL_QUOTED"
+    quote_posix_shell "$STATE_TRANSACTION_ID"
+    quoted_transaction="$STATE_SHELL_QUOTED"
+    quote_posix_shell "$socket_root"
+    quoted_socket_root="$STATE_SHELL_QUOTED"
+    STATE_ACK_COMMAND="$quoted_executable __state-ack $quoted_directory $quoted_transaction $quoted_socket_root"
+    STATE_ACK_COMMAND="${STATE_ACK_COMMAND//#/##}"
+}
+
+function acknowledge_state_transaction {
+    local state_directory="$1"
+    local transaction_id="$2"
+    local socket_root="$3"
+    local pending_file=""
+    local expected_session=""
+    local expected_path=""
+    local current_path=""
+    local pending_fd=""
+
+    if [[ "$state_directory" != /* ]] || \
+        [[ ! "$transaction_id" =~ ^[A-Za-z0-9_-]+$ ]] || \
+        [[ -L "$state_directory" ]] || [[ ! -d "$state_directory" ]] || \
+        [[ ! -O "$state_directory" ]]; then
+        return 1
+    fi
+    require_state_dependencies || return
+    if [[ -z "$TMUX_BIN" ]] || [[ ! -x "$TMUX_BIN" ]] || \
+        [[ "$socket_root" != /* ]]; then
+        return 1
+    fi
+    export TMUX_TMPDIR="$socket_root"
+    STATE_DIRECTORY="$state_directory"
+    STATE_FILE="$STATE_DIRECTORY/state"
+    pending_file="$STATE_DIRECTORY/pending.$transaction_id"
+    if ! exec {pending_fd}<"$pending_file" || \
+        ! "$FLOCK_BIN" -s -n "$pending_fd"; then
+        if [[ -n "$pending_fd" ]]; then
+            exec {pending_fd}>&-
+        fi
+        return 1
+    fi
+    if ! parse_pending_record "$pending_file" "$transaction_id"; then
+        "$FLOCK_BIN" -u "$pending_fd"
+        exec {pending_fd}>&-
+        return 1
+    fi
+    expected_session="$PENDING_SESSION_NAME"
+    expected_path="$PENDING_SESSION_PATH"
+    if ! run_tmux_command has-session \
+        -t "=$expected_session" 2>/dev/null; then
+        "$FLOCK_BIN" -u "$pending_fd"
+        exec {pending_fd}>&-
+        return 1
+    fi
+    if load_session_path_option "$expected_session"; then
+        current_path="$SESSION_PATH_VALUE"
+    fi
+    if [[ "$current_path" != "$expected_path" ]] || \
+        ! write_ack_record "$transaction_id"; then
+        "$FLOCK_BIN" -u "$pending_fd"
+        exec {pending_fd}>&-
+        return 1
+    fi
+    "$FLOCK_BIN" -u "$pending_fd"
+    exec {pending_fd}>&-
+}
+
 function normalize_session_name {
     local session_name="$1"
 
@@ -236,7 +1381,6 @@ function resolve_working_path {
 
 function load_managed_sessions {
     local session_name=""
-    local session_path=""
     local -a session_names=()
 
     MANAGED_SESSION_NAMES=()
@@ -245,11 +1389,9 @@ function load_managed_sessions {
         run_tmux_command list-sessions -F '#{session_name}' 2>/dev/null || true
     )
     for session_name in "${session_names[@]}"; do
-        session_path=$(run_tmux_command show-options -qv \
-            -t "=$session_name:" @tmux-runner-path 2>/dev/null || true)
-        if [[ -n "$session_path" ]]; then
+        if load_session_path_option "$session_name"; then
             MANAGED_SESSION_NAMES+=("$session_name")
-            MANAGED_SESSION_PATHS+=("$session_path")
+            MANAGED_SESSION_PATHS+=("$SESSION_PATH_VALUE")
         fi
     done
 }
@@ -278,20 +1420,35 @@ function report_ambiguous_path {
     return 2
 }
 
-function session_path_option {
+function load_session_path_option {
     local session_name="$1"
+    local marker=""
+    local encoded_path=""
 
-    run_tmux_command show-options -qv -t "=$session_name:" \
-        @tmux-runner-path 2>/dev/null || true
+    SESSION_PATH_VALUE=""
+    marker=$(run_tmux_command show-options -qv -t "=$session_name:" \
+        @tmux-runner-path 2>/dev/null || true)
+    if [[ -z "$marker" ]]; then
+        return 1
+    fi
+    if [[ "$marker" == "$SESSION_PATH_MARKER_PREFIX"* ]]; then
+        encoded_path="${marker#"$SESSION_PATH_MARKER_PREFIX"}"
+        if ! state_decode_field "$encoded_path"; then
+            return 1
+        fi
+        SESSION_PATH_VALUE="$STATE_DECODED"
+    else
+        SESSION_PATH_VALUE="$marker"
+    fi
+    [[ "$SESSION_PATH_VALUE" == /* ]]
 }
 
 function connect_verified_path {
     local session_name="$1"
     local canonical_path="$2"
-    local current_path=""
-
-    current_path=$(session_path_option "$session_name")
-    if [[ "$current_path" != "$canonical_path" ]]; then
+    if ! load_session_path_option "$session_name" || \
+        [[ "$SESSION_PATH_VALUE" != "$canonical_path" ]]; then
+        discard_state_event || true
         fail "session identity changed before attachment: $session_name"
         return
     fi
@@ -302,49 +1459,52 @@ function try_marked_session {
     local session_name="$1"
     local canonical_path="$2"
     local target="=$session_name"
-    local existing_path=""
+    local marker=""
     local create_output=""
     local create_rc=0
 
+    stage_state_event "$session_name" "$canonical_path" || return
     if run_tmux_command has-session -t "$target" 2>/dev/null; then
-        existing_path=$(session_path_option "$session_name")
-        if [[ "$existing_path" == "$canonical_path" ]]; then
+        if load_session_path_option "$session_name" && \
+            [[ "$SESSION_PATH_VALUE" == "$canonical_path" ]]; then
             return 0
         fi
+        discard_state_event || true
         return 3
     fi
 
     # set-option takes a pane target. The trailing colon keeps the session
     # component exact while selecting its current window.
+    encode_session_path_marker "$canonical_path"
+    marker="$SESSION_PATH_MARKER"
     create_output=$(run_tmux_command new-session -d -s "$session_name" \
         -c "$canonical_path" \; set-option -t "=$session_name:" \
-        @tmux-runner-path "$canonical_path" 2>&1) || create_rc=$?
+        @tmux-runner-path "$marker" 2>&1) || create_rc=$?
     if (( create_rc == 0 )); then
         return 0
     fi
     if run_tmux_command has-session -t "$target" 2>/dev/null; then
-        existing_path=$(session_path_option "$session_name")
-        if [[ "$existing_path" == "$canonical_path" ]]; then
+        if load_session_path_option "$session_name" && \
+            [[ "$SESSION_PATH_VALUE" == "$canonical_path" ]]; then
             return 0
         fi
+        discard_state_event || true
         return 3
     fi
     if [[ -n "$create_output" ]]; then
         printf '%s\n' "$create_output" >&2
     fi
+    discard_state_event || true
     return "$create_rc"
 }
 
 function report_explicit_conflict {
     local session_name="$1"
     local canonical_path="$2"
-    local existing_path=""
-
-    existing_path=$(session_path_option "$session_name")
-    if [[ -z "$existing_path" ]]; then
+    if ! load_session_path_option "$session_name"; then
         fail "session $session_name exists without @tmux-runner-path; choose another -s name or attach directly"
     else
-        fail "session $session_name belongs to $existing_path, not $canonical_path"
+        fail "session $session_name belongs to $SESSION_PATH_VALUE, not $canonical_path"
     fi
 }
 
@@ -789,19 +1949,20 @@ function catalog_label_for_path {
 function connect_auto_path {
     local canonical_path="$1"
     local candidate_name="$2"
-    local candidate_path=""
 
     load_managed_sessions
     find_path_matches "$canonical_path"
     if (( ${#PATH_MATCHES[@]} > 1 )); then
+        discard_state_event || true
         report_ambiguous_path "$canonical_path"
         return
     fi
     if (( ${#PATH_MATCHES[@]} == 1 )); then
         connect_verified_path "${PATH_MATCHES[0]}" "$canonical_path"
     else
-        candidate_path=$(session_path_option "$candidate_name")
-        if [[ "$candidate_path" != "$canonical_path" ]]; then
+        if ! load_session_path_option "$candidate_name" || \
+            [[ "$SESSION_PATH_VALUE" != "$canonical_path" ]]; then
+            discard_state_event || true
             fail "session identity changed before attachment: $candidate_name"
             return
         fi
@@ -1011,17 +2172,177 @@ function run_tmux_command {
     if [[ ! -e "$config_file" ]]; then
         config_file="/dev/null"
     fi
-    "$TMUX_BIN" -L "$TMUX_SERVER_NAME" -f "$config_file" "$@"
+    (
+        if [[ -n "$STATE_LOCK_FD" ]]; then
+            exec {STATE_LOCK_FD}>&-
+        fi
+        if [[ -n "$STATE_EVENT_FD" ]]; then
+            exec {STATE_EVENT_FD}>&-
+        fi
+        "$TMUX_BIN" -L "$TMUX_SERVER_NAME" -f "$config_file" "$@"
+    )
+}
+
+function run_tmux_command_without_state_fds {
+    run_tmux_command "$@"
+}
+
+function connect_inside_session {
+    local session_name="$1"
+    local target="=$session_name"
+    local tmux_rc=0
+    local state_rc=0
+
+    run_tmux_command_without_state_fds switch-client -t "$target" || \
+        tmux_rc=$?
+    if (( tmux_rc == 0 )); then
+        if ! create_state_acknowledgment; then
+            clear_state_event
+            return 1
+        fi
+        settle_state_event 1 || state_rc=$?
+    else
+        settle_state_event 0 || state_rc=$?
+    fi
+    if (( state_rc != 0 )); then
+        if (( tmux_rc == 0 )) && [[ -f "$STATE_ACK_FILE" ]]; then
+            clear_state_event
+            return 0
+        fi
+        clear_state_event
+        return "$state_rc"
+    fi
+    return "$tmux_rc"
+}
+
+function connect_outside_session {
+    local session_name="$1"
+    local target="=$session_name"
+    local terminal_fd=""
+    local attach_pid=""
+    local attach_rc=0
+    local state_rc=0
+    local settled=0
+    local acknowledged=0
+    local event_lock_released=0
+    local ack_file="$STATE_ACK_FILE"
+    local ack_deadline=0
+
+    if ! build_state_ack_command; then
+        discard_state_event || true
+        return 1
+    fi
+    if ! exec {terminal_fd}<&0; then
+        settle_state_event 0 || state_rc=$?
+        if (( state_rc != 0 )); then
+            clear_state_event
+        fi
+        fail "cannot duplicate terminal input for attachment"
+        return
+    fi
+    (
+        exec 0<&"$terminal_fd"
+        exec {terminal_fd}>&-
+        if [[ -n "$STATE_LOCK_FD" ]]; then
+            exec {STATE_LOCK_FD}>&-
+        fi
+        if [[ -n "$STATE_EVENT_FD" ]]; then
+            exec {STATE_EVENT_FD}>&-
+        fi
+        run_tmux_command attach-session -t "$target" \
+            \; run-shell "$STATE_ACK_COMMAND"
+    ) &
+    attach_pid=$!
+    exec {terminal_fd}>&-
+
+    while true; do
+        if [[ -f "$ack_file" ]] && [[ ! -L "$ack_file" ]]; then
+            acknowledged=1
+            break
+        fi
+        if ! kill -0 "$attach_pid" 2>/dev/null; then
+            break
+        fi
+        "$SLEEP_BIN" 0.02
+    done
+    if (( acknowledged )); then
+        if settle_state_event 1; then
+            settled=1
+        else
+            state_rc=$?
+            release_state_event_lock
+            event_lock_released=1
+        fi
+    fi
+
+    while (( acknowledged && ! settled && event_lock_released )) && \
+        kill -0 "$attach_pid" 2>/dev/null; do
+        if recover_released_state_event; then
+            settled=1
+            break
+        fi
+        "$SLEEP_BIN" 0.05
+    done
+
+    wait "$attach_pid" || attach_rc=$?
+    if (( ! acknowledged && attach_rc == 0 )); then
+        ack_deadline=$((SECONDS + STATE_ACK_WAIT_TIMEOUT))
+        while (( SECONDS <= ack_deadline )); do
+            if [[ -f "$ack_file" ]] && [[ ! -L "$ack_file" ]]; then
+                acknowledged=1
+                break
+            fi
+            "$SLEEP_BIN" 0.02
+        done
+    fi
+    if (( ! settled )); then
+        if (( ! acknowledged )); then
+            if [[ -f "$ack_file" ]] && [[ ! -L "$ack_file" ]]; then
+                acknowledged=1
+            fi
+        fi
+        state_rc=0
+        if (( event_lock_released )); then
+            if recover_released_state_event; then
+                settled=1
+            else
+                state_rc=0
+                clear_state_event
+                settled=1
+            fi
+        elif settle_state_event "$acknowledged"; then
+            settled=1
+        else
+            state_rc=$?
+        fi
+    fi
+    if (( ! settled )); then
+        clear_state_event
+        return "$state_rc"
+    fi
+    return "$attach_rc"
 }
 
 function connect_session {
     local session_name="$1"
-    local target="=$session_name"
+    local session_path=""
+
+    if load_session_path_option "$session_name"; then
+        session_path="$SESSION_PATH_VALUE"
+    fi
+    if [[ -n "$STATE_TRANSACTION_ID" ]] && \
+        { [[ "$STATE_EVENT_SESSION_NAME" != "$session_name" ]] || \
+            [[ "$STATE_EVENT_SESSION_PATH" != "$session_path" ]]; }; then
+        discard_state_event || return
+    fi
+    if [[ -z "$STATE_TRANSACTION_ID" ]]; then
+        stage_state_event "$session_name" "$session_path" || return
+    fi
 
     if [[ -n "${TMUX:-}" ]]; then
-        run_tmux_command switch-client -t "$target"
+        connect_inside_session "$session_name"
     else
-        run_tmux_command attach-session -t "$target"
+        connect_outside_session "$session_name"
     fi
 }
 
@@ -1095,6 +2416,7 @@ function run_create {
             fail_create_usage "$command_name" "session name must not be empty"
             return
         fi
+        initialize_state_runtime || return
         enter_explicit_path "$session_name" "$canonical_path"
         return
     fi
@@ -1104,6 +2426,7 @@ function run_create {
         return
     fi
     short_hostname=$("$HOSTNAME_BIN" -s)
+    initialize_state_runtime || return
     load_repository_catalog 0 || catalog_rc=$?
     if (( catalog_rc == 0 )) && \
         catalog_label=$(catalog_label_for_path "$canonical_path"); then
@@ -1167,7 +2490,121 @@ function run_repo {
         return
     fi
     short_hostname=$("$HOSTNAME_BIN" -s)
+    initialize_state_runtime || return
     enter_catalog_path "$selected_path" "$selected_label" "$short_hostname"
+}
+
+function run_recent {
+    local selection=""
+    local selected_index=-1
+    local selected_path=""
+    local physical_path=""
+    local effective_path=""
+    local catalog_label=""
+    local catalog_rc=0
+    local short_hostname=""
+    local index=0
+    local -a valid_paths=()
+
+    if (( $# > 0 )); then
+        fail "recent does not accept arguments"
+        return
+    fi
+    initialize_state_runtime || return
+    for selected_path in "${STATE_RECENT_PATHS[@]}"; do
+        if ! physical_path=$(cd -- "$selected_path" 2>/dev/null && pwd -P); then
+            continue
+        fi
+        if [[ "$physical_path" != "$selected_path" ]]; then
+            continue
+        fi
+        if ! effective_path=$(resolve_working_path "$selected_path"); then
+            continue
+        fi
+        if [[ "$effective_path" == "$selected_path" ]]; then
+            valid_paths+=("$selected_path")
+        fi
+    done
+    if (( ${#valid_paths[@]} == 0 )); then
+        fail "no recent destinations are available"
+        return
+    fi
+
+    for index in "${!valid_paths[@]}"; do
+        state_encode_field "${valid_paths[$index]}"
+        printf '%d %s\n' "$((index + 1))" "$STATE_ENCODED"
+    done
+    printf 'Select recent destination: '
+    if ! IFS= read -r selection; then
+        printf '\n' >&2
+        fail "no recent selection received"
+        return
+    fi
+    if [[ ! "$selection" =~ ^[0-9]+$ ]]; then
+        fail "recent selection must be a number"
+        return
+    fi
+    while [[ "${#selection}" -gt 1 ]] && \
+        [[ "${selection:0:1}" == "0" ]]; do
+        selection="${selection:1}"
+    done
+    for index in "${!valid_paths[@]}"; do
+        if [[ "$selection" == "$((index + 1))" ]]; then
+            selected_index=$index
+            break
+        fi
+    done
+    if (( selected_index < 0 )); then
+        fail "recent selection is outside the displayed range"
+        return
+    fi
+    selected_path="${valid_paths[$selected_index]}"
+    if ! physical_path=$(cd -- "$selected_path" 2>/dev/null && pwd -P) || \
+        [[ "$physical_path" != "$selected_path" ]]; then
+        fail "recent destination is no longer accessible: $selected_path"
+        return
+    fi
+    effective_path=$(resolve_working_path "$selected_path") || return
+    if [[ "$effective_path" != "$selected_path" ]]; then
+        fail "recent destination identity changed: $selected_path"
+        return
+    fi
+    if [[ -z "$HOSTNAME_BIN" ]] || [[ ! -x "$HOSTNAME_BIN" ]]; then
+        fail "hostname is not available in PATH"
+        return
+    fi
+    short_hostname=$("$HOSTNAME_BIN" -s)
+    load_repository_catalog 0 || catalog_rc=$?
+    if (( catalog_rc == 0 )) && \
+        catalog_label=$(catalog_label_for_path "$selected_path"); then
+        enter_catalog_path "$selected_path" "$catalog_label" \
+            "$short_hostname"
+        return
+    fi
+    if (( catalog_rc != 0 && catalog_rc != 1 )); then
+        return "$catalog_rc"
+    fi
+    enter_automatic_path "$selected_path" "$short_hostname"
+}
+
+function run_last {
+    local target_session=""
+
+    if (( $# > 0 )); then
+        fail "last does not accept arguments"
+        return
+    fi
+    initialize_state_runtime || return
+    if (( ${#STATE_SESSION_NAMES[@]} < 2 )); then
+        fail "no previous runner session is available"
+        return
+    fi
+    target_session="${STATE_SESSION_NAMES[1]}"
+    if ! run_tmux_command has-session -t "=$target_session" 2>/dev/null; then
+        fail "previous runner session no longer exists: $target_session"
+        return
+    fi
+    connect_session "$target_session"
 }
 
 function run_attach {
@@ -1223,6 +2660,7 @@ function run_attach {
     fi
 
     session_name=$(normalize_session_name "$session_name")
+    initialize_state_runtime || return
     connect_session "$session_name"
 }
 
@@ -1238,6 +2676,7 @@ function run_list {
         fail "ls does not accept arguments"
         return
     fi
+    initialize_state_runtime || return
     if ! output=$(run_tmux_command list-sessions); then
         return 1
     fi
@@ -1284,6 +2723,14 @@ function main {
     fi
     shift
 
+    if [[ "$command_name" == "__state-ack" ]]; then
+        if (( $# != 3 )); then
+            return 2
+        fi
+        acknowledge_state_transaction "$1" "$2" "$3"
+        return
+    fi
+
     case "$command_name" in
         -V|--version)
             if (( $# > 0 )); then
@@ -1312,6 +2759,18 @@ function main {
         repo)
             if (( $# == 1 )) && [[ "$1" == "-h" || "$1" == "--help" ]]; then
                 print_repo_help
+                return 0
+            fi
+            ;;
+        recent)
+            if (( $# == 1 )) && [[ "$1" == "-h" || "$1" == "--help" ]]; then
+                print_recent_help
+                return 0
+            fi
+            ;;
+        last)
+            if (( $# == 1 )) && [[ "$1" == "-h" || "$1" == "--help" ]]; then
+                print_last_help
                 return 0
             fi
             ;;
@@ -1347,6 +2806,12 @@ function main {
             ;;
         repo)
             run_repo "$@"
+            ;;
+        recent)
+            run_recent "$@"
+            ;;
+        last)
+            run_last "$@"
             ;;
         attach|a)
             run_attach "$command_name" "$@"
