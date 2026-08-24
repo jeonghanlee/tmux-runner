@@ -233,7 +233,7 @@ function require_dependencies {
     local -a dependencies=(
         bash shellcheck tmux script timeout setsid make install cmp stat find sort
         awk grep sed tr env mkdir chmod rm mkfifo mktemp tee tail sleep
-        hostname git date cp
+        hostname git sha256sum date cp ln
     )
 
     for dependency in "${dependencies[@]}"; do
@@ -286,7 +286,7 @@ function server_fingerprint {
     local root="$1"
 
     run_tmux "$root" list-panes -a \
-        -F '#{session_name}|#{session_id}|#{window_id}|#{pane_id}|#{pane_current_path}' | \
+        -F '#{session_name}|#{session_id}|#{window_id}|#{pane_id}|#{pane_current_path}|#{@tmux-runner-path}' | \
         LC_ALL=C sort
 }
 
@@ -304,6 +304,42 @@ function pane_directory {
 
     run_tmux "$root" list-panes -t "=$session_name" -F \
         '#{pane_current_path}'
+}
+
+function session_path {
+    local root="$1"
+    local session_name="$2"
+
+    run_tmux "$root" show-options -qv -t "=$session_name:" \
+        @tmux-runner-path
+}
+
+function session_name_for_path {
+    local root="$1"
+    local expected_path="$2"
+    local session_name=""
+    local marked_path=""
+
+    while IFS= read -r session_name; do
+        marked_path=$(run_tmux "$root" show-options -qv \
+            -t "=$session_name:" \
+            @tmux-runner-path 2>/dev/null || true)
+        if [[ "$marked_path" == "$expected_path" ]]; then
+            printf '%s\n' "$session_name"
+        fi
+    done < <(session_names "$root")
+}
+
+function init_git_repository {
+    local repository="$1"
+
+    mkdir -p -- "$repository"
+    git -C "$repository" init -q
+    git -C "$repository" config user.name "tmux-runner test"
+    git -C "$repository" config user.email "tmux-runner@example.invalid"
+    printf 'fixture\n' > "$repository/fixture.txt"
+    git -C "$repository" add fixture.txt
+    git -C "$repository" commit -q -m "Create test fixture"
 }
 
 function close_current_pty_input {
@@ -918,6 +954,182 @@ function run_concurrent_create {
     fi
 }
 
+function run_concurrent_auto_create {
+    local label="$1"
+    local root="$2"
+    local home="$3"
+    local xdg_home="$4"
+    local runner="$5"
+    local path_one="$6"
+    local path_two="$7"
+    local barrier_fifo="$WORKSPACE/pty/$label.barrier"
+    local ready_one="$WORKSPACE/pty/$label-one.ready"
+    local ready_two="$WORKSPACE/pty/$label-two.ready"
+    local fifo_one="$WORKSPACE/pty/$label-one.fifo"
+    local fifo_two="$WORKSPACE/pty/$label-two.fifo"
+    local transcript_one="$WORKSPACE/pty/$label-one.typescript"
+    local transcript_two="$WORKSPACE/pty/$label-two.typescript"
+    local console_one="$WORKSPACE/pty/$label-one.console"
+    local console_two="$WORKSPACE/pty/$label-two.console"
+    local command_one=""
+    local command_two=""
+    local barrier_fd=""
+    local fd_one=""
+    local fd_two=""
+    local pid_one=""
+    local pid_two=""
+    local rc_one=0
+    local rc_two=0
+    local target_one=""
+    local target_two=""
+    local clients=""
+    local deadline=0
+    local base_name=""
+    local short_hostname=""
+    local sync_bin="$WORKSPACE/pty/$label-bin"
+    local sync_ready="$WORKSPACE/pty/$label-tmux-ready"
+    local sync_tmux="$WORKSPACE/pty/$label-bin/tmux"
+    local race_trace_prefix=""
+    # Positional parameters are expanded by the child Bash process.
+    # shellcheck disable=SC2016
+    local wrapper='printf "ready\n" > "$1"; IFS= read -r < "$2"; shift 2; exec "$@"'
+
+    short_hostname=$(hostname -s)
+    short_hostname="${short_hostname//./_}"
+    short_hostname="${short_hostname//:/_}"
+    base_name="${path_one##*/}-$short_hostname"
+    race_trace_prefix="$sync_tmux -L $RUNNER_SERVER_NAME -f /dev/null"
+    mkdir -p -- "$sync_bin" "$sync_ready"
+    # shellcheck disable=SC2016
+    {
+        printf '%s\n' '#!/usr/bin/env bash'
+        printf '%s\n' 'set -euo pipefail'
+        printf '%s\n' 'tmux_args=("$@")'
+        printf '%s\n' 'if [[ " $* " == *" new-session "* ]] && [[ " $* " == *" -s ${TMUX_RUNNER_TEST_RACE_TARGET} "* ]]; then'
+        printf '%s\n' '    : > "${TMUX_RUNNER_TEST_RACE_READY}/$$"'
+        printf '%s\n' '    deadline=$((SECONDS + 10))'
+        printf '%s\n' '    while (( SECONDS <= deadline )); do'
+        printf '%s\n' '        shopt -s nullglob'
+        printf '%s\n' '        ready_files=("${TMUX_RUNNER_TEST_RACE_READY}"/*)'
+        printf '%s\n' '        if (( ${#ready_files[@]} >= 2 )); then'
+        printf '%s\n' '            break'
+        printf '%s\n' '        fi'
+        printf '%s\n' '        sleep 0.01'
+        printf '%s\n' '    done'
+        printf '%s\n' '    if (( ${#ready_files[@]} < 2 )); then'
+        printf '%s\n' '        printf "tmux race barrier timed out\n" >&2'
+        printf '%s\n' '        exit 99'
+        printf '%s\n' '    fi'
+        printf '%s\n' 'fi'
+        printf '%s\n' 'exec "$TMUX_RUNNER_TEST_REAL_TMUX" "${tmux_args[@]}"'
+    } > "$sync_tmux"
+    chmod 0755 "$sync_tmux"
+
+    mkfifo -- "$barrier_fifo" "$fifo_one" "$fifo_two"
+    exec {barrier_fd}<>"$barrier_fifo"
+    EXTRA_PTY_FDS+=("$barrier_fd")
+    printf -v command_one '%q ' bash -c "$wrapper" concurrent-auto \
+        "$ready_one" "$barrier_fifo" env \
+        PATH="$sync_bin:$PATH" TMUX_RUNNER_TEST_REAL_TMUX="$TMUX_PATH" \
+        TMUX_RUNNER_TEST_RACE_TARGET="$base_name" \
+        TMUX_RUNNER_TEST_RACE_READY="$sync_ready" \
+        bash -x "$runner" create -c "$path_one"
+    command_one="${command_one% }"
+    printf -v command_two '%q ' bash -c "$wrapper" concurrent-auto \
+        "$ready_two" "$barrier_fifo" env \
+        PATH="$sync_bin:$PATH" TMUX_RUNNER_TEST_REAL_TMUX="$TMUX_PATH" \
+        TMUX_RUNNER_TEST_RACE_TARGET="$base_name" \
+        TMUX_RUNNER_TEST_RACE_READY="$sync_ready" \
+        bash -x "$runner" create -c "$path_two"
+    command_two="${command_two% }"
+
+    setsid env -u TMUX HOME="$home" XDG_CONFIG_HOME="$xdg_home" \
+        TMUX_TMPDIR="$root" SHELL=/bin/bash \
+        timeout --foreground -k 2s "${PTY_TIMEOUT_SECONDS}s" \
+        script -q -e -f -c "$command_one" "$transcript_one" \
+        < "$fifo_one" > "$console_one" 2>&1 &
+    pid_one=$!
+    record_manifest pid "$pid_one"
+    EXTRA_PTY_PIDS+=("$pid_one")
+    exec {fd_one}>"$fifo_one"
+    EXTRA_PTY_FDS+=("$fd_one")
+
+    setsid env -u TMUX HOME="$home" XDG_CONFIG_HOME="$xdg_home" \
+        TMUX_TMPDIR="$root" SHELL=/bin/bash \
+        timeout --foreground -k 2s "${PTY_TIMEOUT_SECONDS}s" \
+        script -q -e -f -c "$command_two" "$transcript_two" \
+        < "$fifo_two" > "$console_two" 2>&1 &
+    pid_two=$!
+    record_manifest pid "$pid_two"
+    EXTRA_PTY_PIDS+=("$pid_two")
+    exec {fd_two}>"$fifo_two"
+    EXTRA_PTY_FDS+=("$fd_two")
+
+    if ! wait_for_file "$ready_one" || ! wait_for_file "$ready_two"; then
+        fail_test "$label runners did not reach the release barrier"
+    fi
+    printf '\n\n' >&"$barrier_fd"
+    exec {barrier_fd}>&-
+
+    deadline=$((SECONDS + PTY_TIMEOUT_SECONDS))
+    while (( SECONDS <= deadline )); do
+        clients=$(current_client_sessions "$root")
+        if (( $(grep -c . <<< "$clients") == 2 )); then
+            break
+        fi
+        sleep "$POLL_INTERVAL_SECONDS"
+    done
+    if (( $(grep -c . <<< "$clients") != 2 )); then
+        fail_test "$label did not attach both concurrent clients"
+    fi
+
+    target_one=$(session_name_for_path "$root" "$path_one")
+    target_two=$(session_name_for_path "$root" "$path_two")
+    if [[ -z "$target_one" ]] || [[ "$target_one" == *$'\n'* ]]; then
+        fail_test "$label first path did not have exactly one marked session"
+    fi
+    if [[ -z "$target_two" ]] || [[ "$target_two" == *$'\n'* ]]; then
+        fail_test "$label second path did not have exactly one marked session"
+    fi
+    assert_not_equal "$target_one" "$target_two" \
+        "$label reused one session for different paths"
+    assert_contains "$transcript_one" \
+        "$race_trace_prefix attach-session -t =$target_one" \
+        "$label first client entered the wrong path"
+    assert_contains "$transcript_two" \
+        "$race_trace_prefix attach-session -t =$target_two" \
+        "$label second client entered the wrong path"
+
+    assert_contains "$transcript_one" \
+        "$race_trace_prefix new-session -d -s $base_name" \
+        "$label first runner did not race for the base name"
+    assert_contains "$transcript_two" \
+        "$race_trace_prefix new-session -d -s $base_name" \
+        "$label second runner did not race for the base name"
+    if grep -F -- '+ create_rc=1' "$transcript_one" >/dev/null; then
+        if (( $(grep -Fc -- '+ load_managed_sessions' "$transcript_one") < 3 )); then
+            fail_test "$label first race loser did not reload marked sessions"
+        fi
+    elif grep -F -- '+ create_rc=1' "$transcript_two" >/dev/null; then
+        if (( $(grep -Fc -- '+ load_managed_sessions' "$transcript_two") < 3 )); then
+            fail_test "$label second race loser did not reload marked sessions"
+        fi
+    else
+        fail_test "$label did not exercise duplicate-create recovery"
+    fi
+
+    run_tmux "$root" detach-client -s "=$target_one"
+    run_tmux "$root" detach-client -s "=$target_two"
+    exec {fd_one}>&-
+    exec {fd_two}>&-
+    wait "$pid_one" || rc_one=$?
+    wait "$pid_two" || rc_two=$?
+    EXTRA_PTY_PIDS=()
+    EXTRA_PTY_FDS=()
+    assert_equal "0" "$rc_one" "$label first runner failed"
+    assert_equal "0" "$rc_two" "$label second runner failed"
+}
+
 function start_source_client {
     local label="$1"
     local root="$2"
@@ -1228,6 +1440,12 @@ function test_t2_create {
     run_tmux "$root" new-session -d -s prefix-target-long
     run_outside_success t2-prefix "$root" "$home" "$xdg_home" \
         "$RUNNER" prefix-target create -s prefix-target -c "$named_dir"
+    assert_equal "$named_dir" "$(session_path "$root" prefix-target)" \
+        "full-name option lookup selected the prefix sibling"
+    assert_equal "" \
+        "$(run_tmux "$root" show-options -qv -t '=prefix-target-long:' \
+            @tmux-runner-path 2>/dev/null || true)" \
+        "exact option target changed the prefix sibling"
     run_tmux "$root" new-session -d -s source-create
     run_inside_success t2-inside-new "$root" "$home" "$xdg_home" \
         source-create inside_new "$RUNNER" create -s inside.new -c "$inside_dir"
@@ -1873,7 +2091,7 @@ function test_t8_help {
     assert_contains "$WORKSPACE/t8/create-long.stdout" "-c <folder>" \
         "create help omitted the folder option"
     assert_contains "$WORKSPACE/t8/create-long.stdout" \
-        "<folder>-<short-hostname>" \
+        "<repo-or-folder>-<short-hostname>" \
         "create help omitted the default session name"
     assert_contains "$WORKSPACE/t8/list-long.stdout" "select one by number" \
         "ls help omitted selection behavior"
@@ -2265,6 +2483,277 @@ function test_m3_t4_client_boundary {
     pass_test M3-T4 "dedicated switching and cold other-server rejection"
 }
 
+function test_m4_t1_repository_identity {
+    local root=""
+    local home="$WORKSPACE/m4-t1/home"
+    local xdg_home="$WORKSPACE/m4-t1/xdg"
+    local repository="$WORKSPACE/m4-t1/project.repo"
+    local subdir_one="$repository/src/one"
+    local subdir_two="$repository/src/two"
+    local short_hostname=""
+    local session_name=""
+    local identity_before=""
+
+    create_tmux_root m4-t1
+    root="$NEW_TMUX_ROOT"
+    mkdir -p -- "$home" "$xdg_home"
+    init_git_repository "$repository"
+    mkdir -p -- "$subdir_one" "$subdir_two"
+    short_hostname=$(hostname -s)
+    short_hostname="${short_hostname//./_}"
+    short_hostname="${short_hostname//:/_}"
+    session_name="project_repo-$short_hostname"
+
+    run_outside_success m4-t1-first "$root" "$home" "$xdg_home" \
+        "$RUNNER" "$session_name" create -c "$subdir_one"
+    assert_equal "$repository" "$(session_path "$root" "$session_name")" \
+        "repository session recorded the wrong canonical path"
+    assert_equal "$repository" "$(pane_directory "$root" "$session_name")" \
+        "repository session did not start at the Git top level"
+    identity_before=$(session_identity "$root" "$session_name")
+
+    run_outside_success m4-t1-second "$root" "$home" "$xdg_home" \
+        "$RUNNER" "$session_name" create -c "$subdir_two"
+    assert_equal "$identity_before" \
+        "$(session_identity "$root" "$session_name")" \
+        "two repository subdirectories did not reuse one session"
+    assert_not_contains "$LAST_TRANSCRIPT" \
+        "$TMUX_RUNNER_TRACE_PREFIX new-session" \
+        "repository path reuse created another session"
+    pass_test M4-T1 "Git top-level path identity and subdirectory reuse"
+}
+
+function test_m4_t2_collision_identity {
+    local root=""
+    local home="$WORKSPACE/m4-t2/home"
+    local xdg_home="$WORKSPACE/m4-t2/xdg"
+    local short_hostname=""
+    local repo_one="$WORKSPACE/m4-t2/base-one/shared"
+    local repo_two="$WORKSPACE/m4-t2/base-two/shared"
+    local deep_one="$WORKSPACE/m4-t2/top-one/common/deep"
+    local deep_two="$WORKSPACE/m4-t2/top-two/common/deep"
+    local triple_one="$WORKSPACE/m4-t2/head-one/same/middle/triple"
+    local triple_two="$WORKSPACE/m4-t2/head-two/same/middle/triple"
+    local norm_one="$WORKSPACE/m4-t2/hash/alpha.dot/norm"
+    local norm_two="$WORKSPACE/m4-t2/hash/alpha:dot/norm"
+    local race_one="$WORKSPACE/m4-t2/race-one/race"
+    local race_two="$WORKSPACE/m4-t2/race-two/race"
+    local hash_output=""
+    local path_hash=""
+    local full_stem=""
+    local occupied_name=""
+    local hash_name=""
+    local unrelated_path="$WORKSPACE/m4-t2/unrelated"
+
+    create_tmux_root m4-t2
+    root="$NEW_TMUX_ROOT"
+    mkdir -p -- "$home" "$xdg_home" "$unrelated_path"
+    init_git_repository "$repo_one"
+    init_git_repository "$repo_two"
+    init_git_repository "$deep_one"
+    init_git_repository "$deep_two"
+    init_git_repository "$triple_one"
+    init_git_repository "$triple_two"
+    init_git_repository "$norm_one"
+    init_git_repository "$norm_two"
+    init_git_repository "$race_one"
+    init_git_repository "$race_two"
+    short_hostname=$(hostname -s)
+    short_hostname="${short_hostname//./_}"
+    short_hostname="${short_hostname//:/_}"
+
+    run_outside_success m4-t2-base-one "$root" "$home" "$xdg_home" \
+        "$RUNNER" "shared-$short_hostname" create -c "$repo_one"
+    run_outside_success m4-t2-base-two "$root" "$home" "$xdg_home" \
+        "$RUNNER" "base-two-shared-$short_hostname" create -c "$repo_two"
+    assert_equal "$repo_one" \
+        "$(session_path "$root" "shared-$short_hostname")" \
+        "first same-basename repository path changed"
+    assert_equal "$repo_two" \
+        "$(session_path "$root" "base-two-shared-$short_hostname")" \
+        "one-parent collision name recorded the wrong path"
+
+    run_outside_success m4-t2-deep-one "$root" "$home" "$xdg_home" \
+        "$RUNNER" "deep-$short_hostname" create -c "$deep_one"
+    run_outside_success m4-t2-deep-two "$root" "$home" "$xdg_home" \
+        "$RUNNER" "top-two-common-deep-$short_hostname" create -c "$deep_two"
+    run_outside_success m4-t2-triple-one "$root" "$home" "$xdg_home" \
+        "$RUNNER" "triple-$short_hostname" create -c "$triple_one"
+    run_outside_success m4-t2-triple-two "$root" "$home" "$xdg_home" \
+        "$RUNNER" "head-two-same-middle-triple-$short_hostname" create \
+        -c "$triple_two"
+
+    run_outside_success m4-t2-norm-one "$root" "$home" "$xdg_home" \
+        "$RUNNER" "norm-$short_hostname" create -c "$norm_one"
+    hash_output=$(printf '%s' "$norm_two" | sha256sum)
+    path_hash="${hash_output%% *}"
+    full_stem="${norm_two#/}"
+    full_stem="${full_stem//\//-}"
+    full_stem="${full_stem//./_}"
+    full_stem="${full_stem//:/_}"
+    occupied_name="${full_stem}-${path_hash:0:12}-$short_hostname"
+    hash_name="${full_stem}-${path_hash:0:13}-$short_hostname"
+    run_tmux "$root" new-session -d -s "$occupied_name" -c "$unrelated_path"
+    run_tmux "$root" set-option -t "=$occupied_name:" \
+        @tmux-runner-path "$unrelated_path"
+    run_outside_success m4-t2-norm-two "$root" "$home" "$xdg_home" \
+        "$RUNNER" "$hash_name" create -c "$norm_two"
+    assert_equal "$norm_two" "$(session_path "$root" "$hash_name")" \
+        "normalized collision did not extend the occupied hash prefix"
+    assert_equal "$unrelated_path" \
+        "$(session_path "$root" "$occupied_name")" \
+        "hash collision handling changed the occupied session marker"
+
+    run_concurrent_auto_create m4-t2-race "$root" "$home" "$xdg_home" \
+        "$RUNNER" "$race_one" "$race_two"
+    assert_equal "1" \
+        "$(session_name_for_path "$root" "$race_one" | grep -c .)" \
+        "concurrent first path did not keep one session"
+    assert_equal "1" \
+        "$(session_name_for_path "$root" "$race_two" | grep -c .)" \
+        "concurrent second path did not keep one session"
+    pass_test M4-T2 "minimum-parent, hash-extension, and concurrent identity"
+}
+
+function test_m4_t3_worktree_identity {
+    local root=""
+    local home="$WORKSPACE/m4-t3/home"
+    local xdg_home="$WORKSPACE/m4-t3/xdg"
+    local main_repo="$WORKSPACE/m4-t3/main-repo"
+    local linked_repo="$WORKSPACE/m4-t3/linked-repo"
+    local short_hostname=""
+    local main_name=""
+    local linked_name=""
+
+    create_tmux_root m4-t3
+    root="$NEW_TMUX_ROOT"
+    mkdir -p -- "$home" "$xdg_home"
+    init_git_repository "$main_repo"
+    git -C "$main_repo" worktree add -q -b linked-fixture "$linked_repo"
+    short_hostname=$(hostname -s)
+    short_hostname="${short_hostname//./_}"
+    short_hostname="${short_hostname//:/_}"
+    main_name="main-repo-$short_hostname"
+    linked_name="linked-repo-$short_hostname"
+
+    run_outside_success m4-t3-main "$root" "$home" "$xdg_home" \
+        "$RUNNER" "$main_name" create -c "$main_repo"
+    run_outside_success m4-t3-linked "$root" "$home" "$xdg_home" \
+        "$RUNNER" "$linked_name" create -c "$linked_repo"
+    assert_not_equal "$(session_identity "$root" "$main_name")" \
+        "$(session_identity "$root" "$linked_name")" \
+        "main and linked working trees shared one session identity"
+    assert_equal "$main_repo" "$(session_path "$root" "$main_name")" \
+        "main working tree recorded the wrong path"
+    assert_equal "$linked_repo" "$(session_path "$root" "$linked_name")" \
+        "linked working tree recorded the wrong path"
+    assert_equal "$linked_repo" "$(pane_directory "$root" "$linked_name")" \
+        "linked working tree session started in the wrong path"
+    pass_test M4-T3 "real linked-worktree identity"
+}
+
+function test_m4_t4_directory_and_explicit_identity {
+    local root=""
+    local home="$WORKSPACE/m4-t4/home"
+    local xdg_home="$WORKSPACE/m4-t4/xdg"
+    local physical_dir="$WORKSPACE/m4-t4/physical-folder"
+    local alias_dir="$WORKSPACE/m4-t4/folder-alias"
+    local repository="$WORKSPACE/m4-t4/explicit-repo"
+    local single_repo="$WORKSPACE/m4-t4/single-repo"
+    local other_path="$WORKSPACE/m4-t4/other-path"
+    local short_hostname=""
+    local physical_name=""
+    local identity_before=""
+    local fingerprint_before=""
+
+    create_tmux_root m4-t4
+    root="$NEW_TMUX_ROOT"
+    mkdir -p -- "$home" "$xdg_home" "$physical_dir" "$other_path"
+    ln -s -- "$physical_dir" "$alias_dir"
+    init_git_repository "$repository"
+    init_git_repository "$single_repo"
+    short_hostname=$(hostname -s)
+    short_hostname="${short_hostname//./_}"
+    short_hostname="${short_hostname//:/_}"
+    physical_name="physical-folder-$short_hostname"
+
+    run_outside_success m4-t4-physical "$root" "$home" "$xdg_home" \
+        "$RUNNER" "$physical_name" create -c "$physical_dir"
+    identity_before=$(session_identity "$root" "$physical_name")
+    run_outside_success m4-t4-alias "$root" "$home" "$xdg_home" \
+        "$RUNNER" "$physical_name" create -c "$alias_dir"
+    assert_equal "$identity_before" \
+        "$(session_identity "$root" "$physical_name")" \
+        "symlink path did not reuse the physical directory identity"
+
+    run_outside_success m4-t4-explicit-one "$root" "$home" "$xdg_home" \
+        "$RUNNER" explicit-one create -s explicit-one -c "$repository"
+    run_outside_success m4-t4-explicit-two "$root" "$home" "$xdg_home" \
+        "$RUNNER" explicit-two create -s explicit-two -c "$repository"
+    fingerprint_before=$(server_fingerprint "$root")
+    run_outside_failure m4-t4-ambiguous "$root" "$home" "$xdg_home" \
+        "$RUNNER" create -c "$repository"
+    assert_contains "$LAST_TRANSCRIPT" "multiple sessions match path" \
+        "ambiguous automatic lookup omitted its error"
+    assert_contains "$LAST_TRANSCRIPT" "  explicit-one" \
+        "ambiguous automatic lookup omitted explicit-one"
+    assert_contains "$LAST_TRANSCRIPT" "  explicit-two" \
+        "ambiguous automatic lookup omitted explicit-two"
+    assert_equal "$fingerprint_before" "$(server_fingerprint "$root")" \
+        "ambiguous automatic lookup changed tmux state"
+
+    run_outside_success m4-t4-single-explicit "$root" "$home" "$xdg_home" \
+        "$RUNNER" chosen-name create -s chosen-name -c "$single_repo"
+    run_outside_success m4-t4-single-auto "$root" "$home" "$xdg_home" \
+        "$RUNNER" chosen-name create -c "$single_repo"
+    assert_not_contains "$LAST_TRANSCRIPT" \
+        "$TMUX_RUNNER_TRACE_PREFIX new-session" \
+        "automatic lookup ignored one exact path match"
+
+    run_tmux "$root" new-session -d -s unmarked-name -c "$other_path"
+    run_outside_failure m4-t4-unmarked "$root" "$home" "$xdg_home" \
+        "$RUNNER" create -s unmarked-name -c "$repository"
+    assert_contains "$LAST_TRANSCRIPT" \
+        "exists without @tmux-runner-path" \
+        "unmarked explicit conflict omitted its guidance"
+
+    run_tmux "$root" new-session -d -s mismatched-name -c "$other_path"
+    run_tmux "$root" set-option -t '=mismatched-name:' \
+        @tmux-runner-path "$other_path"
+    run_outside_failure m4-t4-mismatch "$root" "$home" "$xdg_home" \
+        "$RUNNER" create -s mismatched-name -c "$repository"
+    assert_contains "$LAST_TRANSCRIPT" "belongs to $other_path" \
+        "mismatched explicit conflict omitted the recorded path"
+    assert_equal "$other_path" \
+        "$(session_path "$root" mismatched-name)" \
+        "mismatched explicit conflict changed the recorded path"
+    pass_test M4-T4 "physical paths, path-first reuse, and explicit conflicts"
+}
+
+function test_m4_t5_regression_integration {
+    assert_contains "$README" "@tmux-runner-path" \
+        "README omits the canonical session path marker"
+    assert_contains "$README" "main working tree" \
+        "README omits linked-worktree identity"
+    assert_contains "$README" "minimum distinguishing parent components" \
+        "README omits automatic collision naming"
+    assert_contains "$README" "Multiple explicit names" \
+        "README omits explicit-name path behavior"
+    assert_contains "$WORKSPACE/t8/create-long.stdout" \
+        "Automatic names reuse one exact @tmux-runner-path match" \
+        "create help omits path-first automatic reuse"
+    assert_contains "$WORKSPACE/t8/create-long.stdout" \
+        "Name collisions add minimum parent components, then a path hash." \
+        "create help omits collision naming"
+    assert_contains "$WORKSPACE/t8/create-long.stdout" \
+        "an explicit name; multiple matches fail and list their names." \
+        "create help omits explicit-name path reuse"
+    assert_contains "$WORKSPACE/t8/create-long.stdout" \
+        "Explicit -s names fail if occupied by another or unmarked path." \
+        "create help omits explicit-name conflict behavior"
+    pass_test M4-T5 "M1-M4 command, install, server, and identity integration"
+}
+
 function assert_manifest_processes_stopped {
     local manifest="$1"
     local process_id=""
@@ -2409,6 +2898,11 @@ function main {
     test_m3_t2_server_isolation
     test_m3_t3_config_lifecycle
     test_m3_t4_client_boundary
+    test_m4_t1_repository_identity
+    test_m4_t2_collision_identity
+    test_m4_t3_worktree_identity
+    test_m4_t4_directory_and_explicit_identity
+    test_m4_t5_regression_integration
     printf 'PASS: %d milestone checks completed\n' "$TESTS_PASSED"
 }
 

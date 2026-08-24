@@ -23,18 +23,30 @@ command uses `attach-session`. Inside the dedicated server, it uses
 with an instruction to detach and rerun it from the outer shell before it
 queries or starts the dedicated server.
 
+For `create`, the runner resolves the requested directory to a physical path.
+Inside Git, real Git metadata supplies the working-tree top level; a linked
+worktree therefore remains distinct from its main working tree. Outside Git,
+the physical directory itself is the identity. Each managed session stores
+that canonical path in the tmux session option `@tmux-runner-path`.
+
 ## Requirements
 
-Running `tmux-runner` requires Bash 4 or later, tmux, and `hostname`.
-Installation additionally requires GNU Make, `install`, Git, `date`, and
-`sed` to copy the runner and stamp its Git and installation metadata. Confirm
-that the commands are available, then verify the Bash and Make versions before
+Session commands require Bash 4 or later and tmux. `create` also requires Git
+to distinguish working trees from ordinary directories. An automatic
+`create` requires `hostname`; `sha256sum` is required when parent components
+cannot produce an available distinct name, including normalized path
+collisions. `ls` and `attach` do not use Git or `hostname`.
+
+Installation additionally requires GNU Make, `install`, `date`, and `sed` to
+copy the runner and stamp its Git and installation metadata. Confirm that the
+commands are available, then verify the Bash and Make versions before
 installation:
 
 ```bash
 command -v bash
 command -v tmux
 command -v hostname
+command -v sha256sum
 command -v make
 command -v install
 command -v git
@@ -59,9 +71,23 @@ tmux-runner create [-s <session-name>] [-c <folder>]
 tmux-runner c [-s <session-name>] [-c <folder>]
 ```
 
-When `-c` is absent, the current directory is used. When `-s` is absent, the
-session name is `<folder>-<short-hostname>` after directory resolution. If the
-exact session already exists, it is entered without creating another session.
+When `-c` is absent, the current directory is used. A path inside a Git working
+tree starts the session at that working tree's top level. A non-Git path starts
+it at the resolved physical directory.
+
+Without `-s`, the runner first reuses a single session whose
+`@tmux-runner-path` exactly matches the canonical path. Otherwise, the initial
+name is `<repo-or-folder>-<short-hostname>`. A same-basename collision adds the
+minimum distinguishing parent components. If distinct paths still normalize
+to the same name, the runner adds a deterministic canonical-path SHA-256
+prefix, beginning with 12 hexadecimal characters and extending it only when
+that candidate is occupied by another path.
+
+With `-s`, the supplied name controls the operation. Multiple explicit names
+may refer to one canonical path. An occupied explicit name is reused only when
+its stored path matches; an unmarked or differently marked name produces an
+error. An automatic request that finds multiple sessions for one path also
+fails and prints their exact names for direct attachment.
 
 List complete `tmux ls` rows, choose one by number, and enter it:
 
@@ -83,8 +109,8 @@ tmux-runner a -- <session-name>
 Use `--` before a positional session name that begins with `-`.
 
 Every supplied or derived session name replaces `.` and `:` with `_`.
-Targets are passed to tmux with the exact-match `=` prefix, so a shorter name
-does not select a longer session with the same prefix.
+Attachment, switching, and existence checks use tmux's exact-match `=` prefix,
+so a shorter name does not select a longer session with the same prefix.
 
 ## Help
 
@@ -170,19 +196,20 @@ Inspect the same action without writing files with
 
 ## First Use
 
-Move to the repository that should supply the default session name and working
-directory, then create and enter the session:
+Move anywhere inside the repository that should supply the default session
+name and working directory, then create and enter the session:
 
 ```bash
 cd /path/to/repository
 tmux-runner create
 ```
 
-The resulting session name is `<folder>-<short-hostname>`. Running the same
-command again enters the existing exact-name session. To return to the original
-shell first, press `Ctrl-b`, release the keys, and then press `d` to detach from
-tmux. Use the same detach sequence before running a `tmux-runner` session
-command from a client connected to the default or any other tmux server.
+The resulting session starts at the Git top level and normally uses
+`<repo>-<short-hostname>`. Running the same command from another subdirectory
+enters the existing path-matched session. To return to the original shell
+first, press `Ctrl-b`, release the keys, and then press `d` to detach from tmux.
+Use the same detach sequence before running a `tmux-runner` session command
+from a client connected to the default or any other tmux server.
 
 ## Verification
 

@@ -12,6 +12,13 @@ TMUX_BIN=$(type -P tmux || true)
 readonly TMUX_BIN
 HOSTNAME_BIN=$(type -P hostname || true)
 readonly HOSTNAME_BIN
+GIT_BIN=$(type -P git || true)
+readonly GIT_BIN
+SHA256_BIN=$(type -P sha256sum || true)
+readonly SHA256_BIN
+MANAGED_SESSION_NAMES=()
+MANAGED_SESSION_PATHS=()
+PATH_MATCHES=()
 
 function print_usage {
     printf 'Usage:\n'
@@ -112,7 +119,13 @@ function print_create_help {
     printf '  -h, --help         Show this help and exit.\n'
     printf '\nDefaults:\n'
     printf '  Folder: current directory\n'
-    printf '  Session: <folder>-<short-hostname>\n'
+    printf '  Working directory: Git top level, or the resolved folder outside Git\n'
+    printf '  First session name: <repo-or-folder>-<short-hostname>\n'
+    printf '\nIdentity:\n'
+    printf '  Automatic names reuse one exact @tmux-runner-path match, including\n'
+    printf '  an explicit name; multiple matches fail and list their names.\n'
+    printf '  Name collisions add minimum parent components, then a path hash.\n'
+    printf '  Explicit -s names fail if occupied by another or unmarked path.\n'
 }
 
 function print_list_help {
@@ -177,6 +190,396 @@ function normalize_session_name {
     printf '%s\n' "$session_name"
 }
 
+function resolve_working_path {
+    local directory="$1"
+    local git_top=""
+    local resolved_top=""
+
+    if [[ -z "$GIT_BIN" ]] || [[ ! -x "$GIT_BIN" ]]; then
+        fail "git is not available in PATH"
+        return
+    fi
+    if git_top=$("$GIT_BIN" -C "$directory" rev-parse --show-toplevel \
+        2>/dev/null); then
+        if ! resolved_top=$(cd -- "$git_top" 2>/dev/null && pwd -P); then
+            fail "Git top level is not accessible: $git_top"
+            return
+        fi
+        printf '%s\n' "$resolved_top"
+    else
+        printf '%s\n' "$directory"
+    fi
+}
+
+function load_managed_sessions {
+    local session_name=""
+    local session_path=""
+    local -a session_names=()
+
+    MANAGED_SESSION_NAMES=()
+    MANAGED_SESSION_PATHS=()
+    mapfile -t session_names < <(
+        run_tmux_command list-sessions -F '#{session_name}' 2>/dev/null || true
+    )
+    for session_name in "${session_names[@]}"; do
+        session_path=$(run_tmux_command show-options -qv \
+            -t "=$session_name:" @tmux-runner-path 2>/dev/null || true)
+        if [[ -n "$session_path" ]]; then
+            MANAGED_SESSION_NAMES+=("$session_name")
+            MANAGED_SESSION_PATHS+=("$session_path")
+        fi
+    done
+}
+
+function find_path_matches {
+    local canonical_path="$1"
+    local index=0
+
+    PATH_MATCHES=()
+    for index in "${!MANAGED_SESSION_PATHS[@]}"; do
+        if [[ "${MANAGED_SESSION_PATHS[$index]}" == "$canonical_path" ]]; then
+            PATH_MATCHES+=("${MANAGED_SESSION_NAMES[$index]}")
+        fi
+    done
+}
+
+function report_ambiguous_path {
+    local canonical_path="$1"
+    local session_name=""
+
+    printf '%s: multiple sessions match path: %s\n' \
+        "$PROGRAM_NAME" "$canonical_path" >&2
+    for session_name in "${PATH_MATCHES[@]}"; do
+        printf '  %s\n' "$session_name" >&2
+    done
+    return 2
+}
+
+function session_path_option {
+    local session_name="$1"
+
+    run_tmux_command show-options -qv -t "=$session_name:" \
+        @tmux-runner-path 2>/dev/null || true
+}
+
+function connect_verified_path {
+    local session_name="$1"
+    local canonical_path="$2"
+    local current_path=""
+
+    current_path=$(session_path_option "$session_name")
+    if [[ "$current_path" != "$canonical_path" ]]; then
+        fail "session identity changed before attachment: $session_name"
+        return
+    fi
+    connect_session "$session_name"
+}
+
+function try_marked_session {
+    local session_name="$1"
+    local canonical_path="$2"
+    local target="=$session_name"
+    local existing_path=""
+    local create_output=""
+    local create_rc=0
+
+    if run_tmux_command has-session -t "$target" 2>/dev/null; then
+        existing_path=$(session_path_option "$session_name")
+        if [[ "$existing_path" == "$canonical_path" ]]; then
+            return 0
+        fi
+        return 3
+    fi
+
+    # set-option takes a pane target. The trailing colon keeps the session
+    # component exact while selecting its current window.
+    create_output=$(run_tmux_command new-session -d -s "$session_name" \
+        -c "$canonical_path" \; set-option -t "=$session_name:" \
+        @tmux-runner-path "$canonical_path" 2>&1) || create_rc=$?
+    if (( create_rc == 0 )); then
+        return 0
+    fi
+    if run_tmux_command has-session -t "$target" 2>/dev/null; then
+        existing_path=$(session_path_option "$session_name")
+        if [[ "$existing_path" == "$canonical_path" ]]; then
+            return 0
+        fi
+        return 3
+    fi
+    if [[ -n "$create_output" ]]; then
+        printf '%s\n' "$create_output" >&2
+    fi
+    return "$create_rc"
+}
+
+function report_explicit_conflict {
+    local session_name="$1"
+    local canonical_path="$2"
+    local existing_path=""
+
+    existing_path=$(session_path_option "$session_name")
+    if [[ -z "$existing_path" ]]; then
+        fail "session $session_name exists without @tmux-runner-path; choose another -s name or attach directly"
+    else
+        fail "session $session_name belongs to $existing_path, not $canonical_path"
+    fi
+}
+
+function path_parent_count {
+    local canonical_path="$1"
+    local parent_path=""
+    local -a components=()
+
+    if [[ "$canonical_path" == "/" ]]; then
+        printf '0\n'
+        return 0
+    fi
+    parent_path="${canonical_path%/*}"
+    parent_path="${parent_path#/}"
+    if [[ -z "$parent_path" ]]; then
+        printf '0\n'
+        return 0
+    fi
+    IFS='/' read -r -a components <<< "$parent_path"
+    printf '%d\n' "${#components[@]}"
+}
+
+function path_stem_at_depth {
+    local canonical_path="$1"
+    local depth="$2"
+    local base_name="${canonical_path##*/}"
+    local parent_path=""
+    local prefix=""
+    local component=""
+    local start=0
+    local index=0
+    local -a components=()
+
+    if [[ -z "$base_name" ]]; then
+        base_name="root"
+    fi
+    parent_path="${canonical_path%/*}"
+    parent_path="${parent_path#/}"
+    if [[ -n "$parent_path" ]]; then
+        IFS='/' read -r -a components <<< "$parent_path"
+    fi
+    start=$((${#components[@]} - depth))
+    if (( start < 0 )); then
+        start=0
+    fi
+    for ((index = start; index < ${#components[@]}; index++)); do
+        component="${components[$index]}"
+        if [[ -n "$prefix" ]]; then
+            prefix="${prefix}-${component}"
+        else
+            prefix="$component"
+        fi
+    done
+    if [[ -n "$prefix" ]]; then
+        printf '%s-%s\n' "$prefix" "$base_name"
+    else
+        printf '%s\n' "$base_name"
+    fi
+}
+
+function normalized_base_name {
+    local canonical_path="$1"
+    local base_name="${canonical_path##*/}"
+
+    if [[ -z "$base_name" ]]; then
+        base_name="root"
+    fi
+    normalize_session_name "$base_name"
+}
+
+function candidate_distinguishes_path {
+    local canonical_path="$1"
+    local depth="$2"
+    local current_base=""
+    local current_stem=""
+    local other_base=""
+    local other_stem=""
+    local other_path=""
+
+    current_base=$(normalized_base_name "$canonical_path")
+    current_stem=$(path_stem_at_depth "$canonical_path" "$depth")
+    current_stem=$(normalize_session_name "$current_stem")
+    for other_path in "${MANAGED_SESSION_PATHS[@]}"; do
+        if [[ "$other_path" == "$canonical_path" ]]; then
+            continue
+        fi
+        other_base=$(normalized_base_name "$other_path")
+        if [[ "$other_base" != "$current_base" ]]; then
+            continue
+        fi
+        other_stem=$(path_stem_at_depth "$other_path" "$depth")
+        other_stem=$(normalize_session_name "$other_stem")
+        if [[ "$other_stem" == "$current_stem" ]]; then
+            return 1
+        fi
+    done
+    return 0
+}
+
+function max_collision_depth {
+    local canonical_path="$1"
+    local current_base=""
+    local other_base=""
+    local other_depth=0
+    local maximum=0
+    local other_path=""
+
+    current_base=$(normalized_base_name "$canonical_path")
+    maximum=$(path_parent_count "$canonical_path")
+    for other_path in "${MANAGED_SESSION_PATHS[@]}"; do
+        other_base=$(normalized_base_name "$other_path")
+        if [[ "$other_base" != "$current_base" ]]; then
+            continue
+        fi
+        other_depth=$(path_parent_count "$other_path")
+        if (( other_depth > maximum )); then
+            maximum=$other_depth
+        fi
+    done
+    printf '%d\n' "$maximum"
+}
+
+function has_same_base_collision {
+    local canonical_path="$1"
+    local current_base=""
+    local other_base=""
+    local other_path=""
+
+    current_base=$(normalized_base_name "$canonical_path")
+    for other_path in "${MANAGED_SESSION_PATHS[@]}"; do
+        if [[ "$other_path" == "$canonical_path" ]]; then
+            continue
+        fi
+        other_base=$(normalized_base_name "$other_path")
+        if [[ "$other_base" == "$current_base" ]]; then
+            return 0
+        fi
+    done
+    return 1
+}
+
+function connect_auto_path {
+    local canonical_path="$1"
+    local candidate_name="$2"
+    local candidate_path=""
+
+    load_managed_sessions
+    find_path_matches "$canonical_path"
+    if (( ${#PATH_MATCHES[@]} > 1 )); then
+        report_ambiguous_path "$canonical_path"
+        return
+    fi
+    if (( ${#PATH_MATCHES[@]} == 1 )); then
+        connect_verified_path "${PATH_MATCHES[0]}" "$canonical_path"
+    else
+        candidate_path=$(session_path_option "$candidate_name")
+        if [[ "$candidate_path" != "$canonical_path" ]]; then
+            fail "session identity changed before attachment: $candidate_name"
+            return
+        fi
+        connect_session "$candidate_name"
+    fi
+}
+
+function enter_explicit_path {
+    local session_name="$1"
+    local canonical_path="$2"
+    local attempt_rc=0
+
+    try_marked_session "$session_name" "$canonical_path" || attempt_rc=$?
+    if (( attempt_rc == 0 )); then
+        connect_verified_path "$session_name" "$canonical_path"
+        return
+    fi
+    if (( attempt_rc == 3 )); then
+        report_explicit_conflict "$session_name" "$canonical_path"
+        return
+    fi
+    return "$attempt_rc"
+}
+
+function enter_automatic_path {
+    local canonical_path="$1"
+    local short_hostname="$2"
+    local stem=""
+    local candidate_name=""
+    local previous_candidate=""
+    local hash_output=""
+    local path_hash=""
+    local depth=0
+    local start_depth=0
+    local maximum_depth=0
+    local hash_length=12
+    local attempt_rc=0
+
+    load_managed_sessions
+    find_path_matches "$canonical_path"
+    if (( ${#PATH_MATCHES[@]} > 1 )); then
+        report_ambiguous_path "$canonical_path"
+        return
+    fi
+    if (( ${#PATH_MATCHES[@]} == 1 )); then
+        connect_verified_path "${PATH_MATCHES[0]}" "$canonical_path"
+        return
+    fi
+
+    if has_same_base_collision "$canonical_path"; then
+        start_depth=1
+    fi
+    maximum_depth=$(max_collision_depth "$canonical_path")
+    for ((depth = start_depth; depth <= maximum_depth; depth++)); do
+        if ! candidate_distinguishes_path "$canonical_path" "$depth"; then
+            continue
+        fi
+        stem=$(path_stem_at_depth "$canonical_path" "$depth")
+        candidate_name=$(normalize_session_name "${stem}-${short_hostname}")
+        if [[ "$candidate_name" == "$previous_candidate" ]]; then
+            continue
+        fi
+        previous_candidate="$candidate_name"
+        attempt_rc=0
+        try_marked_session "$candidate_name" "$canonical_path" || \
+            attempt_rc=$?
+        if (( attempt_rc == 0 )); then
+            connect_auto_path "$canonical_path" "$candidate_name"
+            return
+        fi
+        if (( attempt_rc != 3 )); then
+            return "$attempt_rc"
+        fi
+        load_managed_sessions
+    done
+
+    if [[ -z "$SHA256_BIN" ]] || [[ ! -x "$SHA256_BIN" ]]; then
+        fail "sha256sum is required to resolve this session-name collision"
+        return
+    fi
+    stem=$(path_stem_at_depth "$canonical_path" \
+        "$(path_parent_count "$canonical_path")")
+    hash_output=$(printf '%s' "$canonical_path" | "$SHA256_BIN")
+    path_hash="${hash_output%% *}"
+    for ((hash_length = 12; hash_length <= 64; hash_length++)); do
+        candidate_name=$(normalize_session_name \
+            "${stem}-${path_hash:0:hash_length}-${short_hostname}")
+        attempt_rc=0
+        try_marked_session "$candidate_name" "$canonical_path" || \
+            attempt_rc=$?
+        if (( attempt_rc == 0 )); then
+            connect_auto_path "$canonical_path" "$candidate_name"
+            return
+        fi
+        if (( attempt_rc != 3 )); then
+            return "$attempt_rc"
+        fi
+    done
+    fail "no unique session name is available for path: $canonical_path"
+}
+
 function runner_config_file {
     local config_home="${XDG_CONFIG_HOME:-${HOME}/.config}"
 
@@ -231,11 +634,8 @@ function run_create {
     local session_name=""
     local directory=""
     local resolved_directory=""
-    local folder_name=""
+    local canonical_path=""
     local short_hostname=""
-    local target=""
-    local create_output=""
-    local create_rc=0
     local saw_session=0
     local saw_directory=0
 
@@ -289,40 +689,24 @@ function run_create {
         fail_create_usage "$command_name" "folder does not exist: $directory"
         return
     fi
+    canonical_path=$(resolve_working_path "$resolved_directory") || return
 
-    if [[ -z "$session_name" ]]; then
-        folder_name="${resolved_directory##*/}"
-        if [[ -z "$folder_name" ]]; then
-            folder_name="root"
-        fi
-        if [[ -z "$HOSTNAME_BIN" ]] || [[ ! -x "$HOSTNAME_BIN" ]]; then
-            fail "hostname is not available in PATH"
+    if (( saw_session )); then
+        session_name=$(normalize_session_name "$session_name")
+        if [[ -z "$session_name" ]]; then
+            fail_create_usage "$command_name" "session name must not be empty"
             return
         fi
-        short_hostname=$("$HOSTNAME_BIN" -s)
-        session_name="$folder_name-$short_hostname"
-    fi
-
-    session_name=$(normalize_session_name "$session_name")
-    if [[ -z "$session_name" ]]; then
-        fail_create_usage "$command_name" "session name must not be empty"
+        enter_explicit_path "$session_name" "$canonical_path"
         return
     fi
-    target="=$session_name"
 
-    if ! run_tmux_command has-session -t "$target" 2>/dev/null; then
-        create_output=$(run_tmux_command new-session -d -s "$session_name" \
-            -c "$resolved_directory" 2>&1) || create_rc=$?
-        if (( create_rc != 0 )); then
-            if ! run_tmux_command has-session -t "$target" 2>/dev/null; then
-                if [[ -n "$create_output" ]]; then
-                    printf '%s\n' "$create_output" >&2
-                fi
-                return "$create_rc"
-            fi
-        fi
+    if [[ -z "$HOSTNAME_BIN" ]] || [[ ! -x "$HOSTNAME_BIN" ]]; then
+        fail "hostname is not available in PATH"
+        return
     fi
-    connect_session "$session_name"
+    short_hostname=$("$HOSTNAME_BIN" -s)
+    enter_automatic_path "$canonical_path" "$short_hostname"
 }
 
 function run_attach {
