@@ -2,9 +2,13 @@
 
 ## Scope
 
-This document tracks delivery of the initial local-only `tmux-runner` CLI, its Bash completion, installation, and verification.
+This document tracks delivery and extension of the local-only `tmux-runner`
+CLI, its dedicated tmux server, repository-oriented navigation, Bash
+completion, installation, and verification.
 
-**Out of scope:** System-wide installation, service supervision, release execution, GitHub projection, and tmux window or layout management.
+**Out of scope:** System-wide installation, service supervision, Git tag
+creation or push, GitHub release execution, GitHub projection, and tmux window
+or layout management.
 
 Release line: master
 Milestone index: a158012
@@ -13,8 +17,8 @@ Canonical branch or ref: master
 Git upstream: origin/master
 Remote tracker: none
 
-Next session entry point: prepare the M2 carrying commit after commit
-delegation.
+Next session entry point: review and authorize M3 implementation against the
+accepted plan in this document.
 
 ## Milestone
 
@@ -23,9 +27,14 @@ delegation.
 | Group | ID | Work unit | Type | Status | Ready | Deps | Done when / Evidence |
 | --- | --- | --- | --- | --- | --- | --- | --- |
 | Core | M1 | Deliver the local tmux runner | Milestone | Complete | No | D1, D2, D3, D4, D5, D6, D7, D8, D9, D10 | Complete 2026-08-20, correction commit `ede2b62`; corrected T1-T8, third-person review, and final second-person reader pass accepted; [detail](#m1---deliver-the-local-tmux-runner) |
-| Version | M2 | Add source and installed version identity | Milestone | In progress | No | M1, D11, D12 | `-V` and `--version` report version `0.1.0`; source runs show live Git identity, user installs retain injected Git and date metadata, and the real-path suite passes; [detail](#m2---add-source-and-installed-version-identity) |
+| Version | M2 | Add source and installed version identity | Milestone | Complete | No | M1, D11, D12 | Complete 2026-08-23, carrying commit `88d20a4`; M2 / T1-T5, shipped suite T1-T9, and the stage review cycle accepted; [detail](#m2---add-source-and-installed-version-identity) |
+| Server | M3 | Isolate the runner server and local tmux configuration | Milestone | Not started | Yes | M2, D13, D14, D17 | Ready for implementation; dedicated-server behavior and boundaries are resolved; [detail](#m3---isolate-the-runner-server-and-local-tmux-configuration) |
+| Identity | M4 | Resolve repository and working-directory identity | Milestone | Not started | No | M3, D16 | Starts after M3; [detail](#m4---resolve-repository-and-working-directory-identity) |
+| Discovery | M5 | Discover configured repositories and select one | Milestone | Not started | No | M4, D15, D17 | Starts after M4; [detail](#m5---discover-configured-repositories-and-select-one) |
+| Navigation | M6 | Add recent and previous-session navigation | Milestone | Not started | No | M5, D18 | Starts after M5; [detail](#m6---add-recent-and-previous-session-navigation) |
+| Integration | M7 | Complete integrated verification and release preparation | Milestone | Not started | No | M3, M4, M5, M6, D17 | Starts after M3-M6; [detail](#m7---complete-integrated-verification-and-release-preparation) |
 
-Milestone tally: Complete 1, In progress 1.
+Milestone tally: Complete 2, Not started 5.
 
 ### Decisions
 
@@ -43,6 +52,12 @@ Milestone tally: Complete 1, In progress 1.
 | D10 | Provide `-h` and `--help` at the top level and for `create`, `c`, `ls`, `attach`, and `a`; valid help writes to standard output, exits 0, and does not require tmux in `PATH`; do not add a `help` command. | 2026-08-19 |
 | D11 | Set the runner version to `0.1.0`; add the `epics-ioc-runner` source and installed metadata behavior without copying its modular Make structure; keep the version value only in `bin/tmux-runner`, resolve live Git identity for source runs, and inject Git hash, commit date, and install date into the user-installed copy. | 2026-08-22 |
 | D12 | Use the proven `epics-ioc-runner` content comparison, `git diff --quiet HEAD --`, for both live and installed dirty-state detection; verify relocated clean, modified, and read-only-index copies through real Git. | 2026-08-22 |
+| D13 | Starting with M3, supersede D8's inherited server selection: route every runner tmux operation to the named server selected by `-L tmux-runner`; keep it separate from the default tmux server, do not migrate or list default-server sessions, and load the runner configuration only when the dedicated server starts. D8 remains the completed M1 contract. | 2026-08-23 |
+| D14 | Starting with M3, narrow the M1 inside-client behavior: inside the dedicated server, enter another runner session with `switch-client`; inside any other tmux server, return an error without changing state and direct the user to detach and rerun from the outer shell. | 2026-08-23 |
+| D15 | Add `tmux-runner repo` for configured repository discovery and numbered create-or-attach selection; keep `tmux-runner ls` limited to sessions on the dedicated server. | 2026-08-23 |
+| D16 | Starting with M4, supersede D1 for Git working trees while preserving D1 for non-Git directories. For an automatically derived name, use `<repo>-<short-hostname>` when the canonical repository name is unique and prepend the minimum distinguishing parent path on a known collision. If distinct paths still normalize to one name, append a deterministic canonical-path SHA-256 suffix, beginning with 12 hexadecimal characters and extending it if required. Store the canonical path in `@tmux-runner-path` and use path identity before an automatically derived name. Preserve explicit `-s` as name-directed: allow more than one explicit name for one path, but fail instead of choosing among multiple path matches or reusing an occupied name whose path is missing or different. | 2026-08-23 |
+| D17 | Read repository search roots from `${XDG_CONFIG_HOME:-$HOME/.config}/tmux-runner/repos` as one absolute path per line without shell evaluation; ignore blank lines and full-line comments, canonicalize and deduplicate roots, and warn and skip missing roots. Keep tmux settings in the adjacent `tmux.conf`. | 2026-08-23 |
+| D18 | Add a 20-entry recent path list and previous-session navigation under `${XDG_STATE_HOME:-$HOME/.local/state}/tmux-runner`. Record only path-marked sessions in `recent`, allow any successfully entered runner session in `last`, serialize and atomically replace state, and ignore stale records safely. After a successful `switch-client`, update state. For blocking outside attach, stage a transaction and use a server-side acknowledgment after client attachment; commit an acknowledged transaction even if the client later exits abnormally, roll back only an unacknowledged failure, and reconcile orphan transactions on the next state access. | 2026-08-23 |
 
 ### Milestone Details
 
@@ -160,7 +175,7 @@ Superseded Plan Artifacts: none
 Origin: a158012 / M2
 Identity History: none
 GitHub Issue: none
-Status: In progress
+Status: Complete
 
 ##### Summary
 
@@ -256,7 +271,580 @@ Superseded Plan Artifacts: none
 - 2026-08-22: The second-person reader pass accepted the README after its
   requirement checks, dry run, spaced-path installation, installed version,
   file modes, and completion registration all matched a new temporary home.
-- Carrying commit: pending.
+- Carrying commit: `88d20a454a28dd85c3318bf3a84fdf372afab8ff`
+  (`Add version identity to tmux runner`).
+
+#### M3 - Isolate the runner server and local tmux configuration
+
+Origin: a158012 / M3
+Identity History: none
+GitHub Issue: none
+Status: Not started
+
+##### Summary
+
+Move every runner session operation to one dedicated tmux named server. Keep
+its sessions and configuration independent from the user's default tmux
+server while preserving the existing command behavior inside that boundary.
+
+##### Scope
+
+- Route every runner tmux command through `tmux -L tmux-runner` while
+  preserving the active `TMUX_TMPDIR` socket root.
+- Keep `create`, `c`, `ls`, `attach`, `a`, and Bash completion on the same
+  dedicated server path.
+- Read `${XDG_CONFIG_HOME:-$HOME/.config}/tmux-runner/tmux.conf` only when the
+  dedicated server starts; start with `-f /dev/null` when the file is absent so
+  system and general user tmux configuration cannot enter the runner server.
+- Ship `config/tmux.conf` as a valid no-op starter file that imposes no status
+  layout or key binding. Install it at the runner config path with mode `0644`
+  only when that destination does not already exist.
+- Make configuration changes take effect on the next dedicated-server start,
+  without restarting or changing the default tmux server.
+- Continue to use `switch-client` inside the dedicated server.
+- Detect a client connected to any other tmux server, exit nonzero without a
+  tmux or state change, and show the detach-then-rerun instruction.
+- Perform the other-server check after dependency-free help and version output
+  but before any dedicated-server query, creation, configuration, or state
+  operation. Compare the socket field in `TMUX` with the expected `-L` socket
+  path under the effective `TMUX_TMPDIR`.
+- Update help, completion, README architecture, and the real tmux test harness
+  for the dedicated server and isolated configuration path.
+
+Out of scope: Moving existing default-server sessions, controlling the default
+server, automatically restarting a running server after configuration changes,
+and prescribing a site-specific status layout or key map.
+
+##### Completion Criteria
+
+- Runner-created sessions appear only on the `tmux-runner` named server, and
+  default-server sessions never appear in `tmux-runner ls` or completion.
+- Every lifecycle, query, completion, and cleanup path selects the dedicated
+  server; no command silently falls back to the default server.
+- A temporary runner `tmux.conf` changes real server options and key bindings
+  on first start, remains unchanged while that server runs, and is reread after
+  only the dedicated server is stopped and started again.
+- With no runner config, neither system nor general user tmux settings appear
+  on the dedicated server. Local installation copies the no-op starter config
+  with mode `0644` and never changes an existing destination.
+- A runner client switches between runner sessions, while a client on another
+  server receives the detach instruction before a cold runner socket is
+  created and leaves both servers unchanged.
+- The full existing command, installation, help, and version behavior passes
+  after the server boundary changes, with no test socket or process left over.
+
+##### Dependencies And Decisions
+
+- M2, D13, D14, and D17.
+
+##### Implementation Plan
+
+Plan Status: accepted
+Plan Acceptance: 2026-08-23 - accepted the staged roadmap and dedicated-server
+behavior.
+Implementation Authorization: none
+Superseded Plan Artifacts: none
+
+1. Centralize the tmux command prefix and server identity so every runner and
+   completion call uses the same named server and socket root.
+2. Add first-start configuration selection, the no-op starter config, and
+   non-overwriting local installation.
+3. Detect the current tmux socket before any mutable path, preserve
+   dedicated-server switching, and add the no-change error path for a client
+   on another server.
+4. Extend the test harness with dual-server monitors and an outer supervisor
+   that can inspect cleanup after the suite process exits. Successful runs
+   remove test resources; failed runs terminate processes but preserve and
+   report the diagnostic workspace.
+5. Update help, completion, and README text that changes in this milestone,
+   then run the complete shipped suite and the stage review cycle.
+
+##### Test Plan
+
+| Label | Layer | Method | Environment | Expected Result |
+| --- | --- | --- | --- | --- |
+| T1 | Static | Run Bash syntax checks and ShellCheck, then inspect every shipped tmux invocation and completion query for the centralized named-server path. | Repository checkout | All shipped Bash files pass, and no runner operation bypasses the dedicated-server command path. |
+| T2 | Server integration | Start a default server and the `tmux-runner` named server under one temporary socket root; create, list, attach, and complete sessions through the shipped runner and query both servers directly. | Real tmux, temporary `TMUX_TMPDIR`, real PTYs and FIFOs | Each server sees only its own sessions and clients, and every runner operation reaches only the named server. |
+| T3 | Configuration integration | Put a marker in general `~/.tmux.conf`, start once with no runner config, then start with a temporary XDG runner config that sets a different marker, status option, and key binding; change the runner file while its server runs, then stop and restart only that server. Install the starter config twice around a local modification. | Real tmux, temporary `HOME`, `XDG_CONFIG_HOME`, and `TMUX_TMPDIR` | The absent-config start uses isolated defaults; runner values load only on server start and reload only after restart; the default server remains unchanged; and installation creates mode `0644` once without overwriting the modified config. |
+| T4 | Client-boundary integration | Run shipped commands in real dedicated and default-server clients while a dual-server monitor observes both. Repeat the default-client rejection before any named server exists. | Real tmux clients, `script(1)` PTYs, readiness barriers, dual-server state monitor, bounded timeouts | Dedicated clients switch successfully; other-server clients receive the detach instruction and exit nonzero without session, pane, client, or cold-socket creation. Help and version remain dependency-free. |
+| T5 | Regression and cleanup | Run the complete shipped suite with help, version, completion, installation, create, attach, list, and concurrent-create cases under an outer supervisor that receives the workspace and process manifest. | Isolated real tmux and Git environment plus supervisor process | All existing contracts pass. After a passing child exits, the supervisor observes no named or default test server, socket, PTY process, or workspace; a forced failing child terminates processes and preserves and reports its diagnostic workspace. |
+
+##### Verification Results
+
+| Label | Observed At | Environment | Result | Evidence |
+| --- | --- | --- | --- | --- |
+| T1 | Pending | Pending | Pending | Implementation has not started. |
+| T2 | Pending | Pending | Pending | Implementation has not started. |
+| T3 | Pending | Pending | Pending | Implementation has not started. |
+| T4 | Pending | Pending | Pending | Implementation has not started. |
+| T5 | Pending | Pending | Pending | Implementation has not started. |
+
+##### Closure Evidence
+
+- None; implementation has not started.
+
+#### M4 - Resolve repository and working-directory identity
+
+Origin: a158012 / M4
+Identity History: none
+GitHub Issue: none
+Status: Not started
+
+##### Summary
+
+Make a Git working tree, a linked worktree, and a normal directory resolve to
+stable runner identities. Use canonical paths to prevent a same-name session
+from being reused for the wrong location.
+
+##### Scope
+
+- Resolve a path inside a Git working tree to that working tree's top-level
+  directory before deriving its default session identity.
+- Treat each linked worktree as its own working directory, including the
+  `.git` file form used by real linked worktrees.
+- Preserve the existing directory basename behavior outside Git.
+- Store each runner-managed canonical path in the session option
+  `@tmux-runner-path`.
+- When `-s` is absent, look for an exact canonical-path match before deriving
+  or comparing a session name.
+- Use `<repo>-<short-hostname>` when available; when an active path-marked
+  session exposes a same-basename collision, prepend only enough parent
+  components to produce a distinct normalized session name.
+- If all distinguishing parent components still collide after D9
+  normalization, append a stable SHA-256 prefix of the canonical path. Begin
+  with 12 hexadecimal characters and extend the prefix only if an occupied
+  different path still collides.
+- Create a session and its `@tmux-runner-path` option in one tmux command
+  queue. After a concurrent name loss, verify the winner's path; reuse it only
+  on an exact path match, otherwise extend the parent prefix and retry.
+- Keep explicit `-s` name-directed. The same canonical path may have multiple
+  explicit session names; an occupied explicit name is reused only when its
+  path option matches, and a missing or different path option produces an
+  error without an alternate name.
+- If an automatically named request finds more than one session carrying the
+  same canonical path, fail without choosing one and list the exact matching
+  session names for direct attachment.
+- Extend completion, help, README identity examples, and real Git fixtures.
+
+Out of scope: Remote repository URLs, branch-based session names, renaming an
+existing session when a later collision appears, and repository discovery.
+
+##### Completion Criteria
+
+- Two subdirectories of one real Git working tree resolve to one session with
+  the repository root as its tmux working directory.
+- Two different repositories with the same basename never share a session;
+  the later collision uses the minimum parent-path prefix needed to distinguish
+  it without renaming an existing session.
+- A main working tree and a real linked worktree resolve to different canonical
+  paths, sessions, and tmux working directories.
+- A normal non-Git directory retains `<folder>-<short-hostname>` and its own
+  canonical working directory.
+- An automatically named request reuses an exact canonical-path match even
+  when that session was created with an explicit or disambiguated name.
+- An explicit name preserves the existing ability to create multiple sessions
+  for one path, while an occupied explicit name with a different or missing
+  path option fails without wrong-path reuse.
+- Simultaneous creates for two different same-basename paths finish with two
+  correctly marked sessions; neither client enters the other path.
+- Parent components that become equal after D9 normalization still produce
+  stable distinct session names through the canonical-path suffix.
+- After two explicit names are created for one path, an automatically named
+  request reports both exact names and changes no tmux state.
+- Existing create, attach, exact-target, concurrency, and dedicated-server
+  behavior remains valid.
+
+##### Dependencies And Decisions
+
+- M3 and D16.
+
+##### Implementation Plan
+
+Plan Status: accepted
+Plan Acceptance: 2026-08-23 - accepted repository-root, linked-worktree,
+collision, and normal-directory identity behavior.
+Implementation Authorization: none
+Superseded Plan Artifacts: none
+
+1. Add canonical working-path and Git top-level resolution without replacing
+   Git behavior with a hand-built `.git` parser.
+2. Add derived-name path lookup and name-directed explicit behavior, including
+   errors for occupied unmarked or differently marked explicit targets.
+3. Add minimum-parent collision naming and one-queue session-plus-option
+   creation; after a create race, verify the winner's path before reuse or
+   retry with a longer name.
+4. Add deterministic SHA-256 fallback naming and explicit ambiguous-path
+   rejection, then add real repository, linked-worktree, collision, and
+   normal-directory fixtures to the dedicated-server test harness.
+5. Update changed help, completion, and README sections, then run the complete
+   shipped suite and the stage review cycle.
+
+##### Test Plan
+
+| Label | Layer | Method | Environment | Expected Result |
+| --- | --- | --- | --- | --- |
+| T1 | Repository identity | Create one real Git repository and enter it from two different subdirectories through the shipped runner. | Real Git repository, real named tmux server, PTYs | Both entries reuse one path-marked session whose pane starts at the Git top level. |
+| T2 | Collision identity | Create real repositories with the same basename under parents that require one, two, and three distinguishing components; include distinct paths whose parent components become identical after D9 normalization. Retain the first base-name session while entering the others, then release simultaneous creates for two different same-basename paths. | Real Git repositories, real named tmux server, SHA-256 tool, PTYs, FIFOs, and readiness barrier | Every canonical path reaches its own path-marked session, parent prefixes are no longer than required, normalized collisions receive stable 12-or-more-character path suffixes, no existing session is renamed, and concurrent clients never enter the other path. |
+| T3 | Worktree identity | Create a committed repository and a real linked worktree with `git worktree add`, then enter both through the shipped runner. | Real Git linked worktree, real named tmux server | Main and linked working trees have different recorded paths, session identities, and pane working directories. |
+| T4 | Directory and explicit-name identity | Enter one normal directory first by its physical path and then by a symlink path, and compare session IDs. Create two explicit names for one repository, then request its automatic name. With raw tmux, create occupied explicit targets with no path option and with a different path option. | Real filesystem, Git, and named tmux server | Physical and symlink paths reuse one derived session ID; both explicit names for one path remain distinct; the automatic request lists both and fails without choosing; occupied unmarked and mismatched explicit targets cause errors with no reuse or state change. |
+| T5 | Regression integration | Run all existing create, attach, list, completion, concurrent-create, help, version, installation, and server-isolation cases. | Isolated real tmux, Git, PTYs, and XDG paths | All prior contracts pass and no wrong-path or prefix-only reuse occurs. |
+
+##### Verification Results
+
+| Label | Observed At | Environment | Result | Evidence |
+| --- | --- | --- | --- | --- |
+| T1 | Pending | Pending | Pending | Implementation has not started. |
+| T2 | Pending | Pending | Pending | Implementation has not started. |
+| T3 | Pending | Pending | Pending | Implementation has not started. |
+| T4 | Pending | Pending | Pending | Implementation has not started. |
+| T5 | Pending | Pending | Pending | Implementation has not started. |
+
+##### Closure Evidence
+
+- None; implementation has not started.
+
+#### M5 - Discover configured repositories and select one
+
+Origin: a158012 / M5
+Identity History: none
+GitHub Issue: none
+Status: Not started
+
+##### Summary
+
+Add a repository selector without changing the meaning of the existing
+session selector. Discover real Git working trees below configured roots,
+present a stable numbered list, and create or reuse the selected session.
+
+##### Scope
+
+- Add the `repo` command and its top-level help and Bash completion entry.
+- Parse the `repos` file as literal absolute paths, one per line, without
+  executing shell syntax or expanding `~`, variables, globs, or substitutions.
+- Ignore blank lines and full-line comments; preserve spaces in paths;
+  canonicalize and deduplicate roots; warn and continue for missing roots.
+- Recursively discover real Git working trees and linked worktrees, including
+  a configured root that is itself a working tree.
+- Exclude bare repositories and ordinary directories from repository results;
+  keep ordinary directories available through `create`.
+- Deduplicate canonical repository paths reached through overlapping roots or
+  symbolic-link aliases, avoid symbolic-link loops, and sort results stably.
+- Display minimum-parent labels where repository basenames collide and keep
+  the complete selected path visible.
+- Treat the canonical configured catalog as authoritative for duplicate
+  display and new session names. Once the catalog exists, automatically named
+  `create` calls for catalogued paths use the same collision labels; an older
+  exact path-marked session is still reused without renaming.
+- Apply the same SHA-256 suffix rule to catalog labels that remain equal after
+  parent components are normalized.
+- Revalidate the selected path immediately before creating or reusing its
+  path-marked session.
+- Reuse the existing real PTY selection, exact attachment, and concurrent
+  creation paths.
+
+Out of scope: Combining repositories and sessions in `ls`, evaluating the
+configuration as shell code, fzf integration, remote clone or fetch, and
+including bare repositories or arbitrary directories in `repo`.
+
+##### Completion Criteria
+
+- `tmux-runner ls` still lists only dedicated-server sessions, while
+  `tmux-runner repo` lists only discovered Git working trees.
+- A missing or empty `repos` file exits nonzero, prints its expected path and
+  setup form, and makes no tmux change. An unreadable subtree warns and is
+  skipped while readable configured roots continue.
+- Literal configuration parsing handles spaces and comment lines without
+  executing or expanding shell text; duplicate and missing roots are handled
+  as defined by D17.
+- Nested repositories and linked worktrees are found once, bare repositories
+  and ordinary directories are excluded, symbolic-link aliases do not create
+  duplicates, and ordering is stable across runs.
+- Duplicate labels and new derived session names are stable for the same
+  configured catalog regardless of repository selection order.
+- A repository selection with multiple active sessions carrying its canonical
+  path reports the exact names and exits without choosing one.
+- Selecting a repository with no session creates and enters it; selecting it
+  again reuses the same path-marked session; two concurrent selectors reach
+  one session.
+- Invalid input, an empty result, and a repository removed after listing exit
+  nonzero without creating or attaching to a session.
+- Help, completion, README, installation, and all M1-M4 behavior pass through
+  the shipped files.
+
+##### Dependencies And Decisions
+
+- M4, D15, and D17.
+
+##### Implementation Plan
+
+Plan Status: accepted
+Plan Acceptance: 2026-08-23 - accepted a separate `repo` command, literal
+root configuration, and numbered create-or-attach selection.
+Implementation Authorization: none
+Superseded Plan Artifacts: none
+
+1. Add a literal line parser for configured roots with canonicalization,
+   deduplication, explicit missing or empty file guidance, and nonfatal
+   missing or unreadable root reporting.
+2. Add real Git working-tree discovery with linked-worktree, nested-repository,
+   stable-order, alias-deduplication, and loop boundaries.
+3. Add catalog-authoritative collision labels and the shared normalized-name
+   suffix for display and automatically named create paths while leaving
+   existing path-marked sessions and `ls` unchanged.
+4. Connect the selection to canonical-path reuse or concurrent-safe creation,
+   with a final path and working-tree recheck before any tmux change.
+5. Extend help, completion, README, and real integration fixtures, then run the
+   complete shipped suite and the stage review cycle.
+
+##### Test Plan
+
+| Label | Layer | Method | Environment | Expected Result |
+| --- | --- | --- | --- | --- |
+| T1 | Configuration | Exercise missing and empty `repos` files, then build a literal file with blank lines, comments, paths containing spaces, duplicate, missing, and unreadable roots, and text containing shell expansion characters. | Temporary XDG configuration and filesystem sentinels | Missing or empty files fail with the exact setup path and no tmux change; valid roots retain literal paths; bad roots warn and are skipped; duplicates collapse; and no shell text executes or expands. |
+| T2 | Discovery | Create real working trees, linked worktrees, nested repositories, a bare repository, an ordinary directory, overlapping roots, symbolic-link aliases, a loop, and duplicate paths whose parent labels normalize equally; list repeatedly under a timeout and choose duplicates in opposite orders in fresh servers. | Real Git, SHA-256 tool, and temporary filesystem with bounded commands | Each working tree appears once in stable order with an unambiguous complete path; excluded entries remain absent; timeout is not reached; normalized collisions use stable suffixes; and catalog labels and new session names do not depend on selection order. |
+| T3 | Selection integration | Select a repository with no session, select it again, and release two real PTY selectors for the same repository simultaneously. | Real named tmux server, PTYs, FIFOs, readiness barrier | The first selection creates and enters the path-marked session, later selections reuse its identity, and both concurrent clients reach one session. |
+| T4 | Failure integration | Exercise nonnumeric and out-of-range input, no discovered repositories, a path removed after display, and a path changed from working tree to non-repository before selection. | Real filesystem, Git, tmux state monitor, bounded timeouts | Every failure exits nonzero with useful output and no session, pane, or client state change. |
+| T5 | Interface regression | Verify `ls`, `repo`, help, completion, installation, identity, and server isolation through the shipped files. | Isolated real tmux, Git, PTYs, and XDG paths | `ls` remains session-only, `repo` is fully discoverable, and all earlier contracts pass. |
+
+##### Verification Results
+
+| Label | Observed At | Environment | Result | Evidence |
+| --- | --- | --- | --- | --- |
+| T1 | Pending | Pending | Pending | Implementation has not started. |
+| T2 | Pending | Pending | Pending | Implementation has not started. |
+| T3 | Pending | Pending | Pending | Implementation has not started. |
+| T4 | Pending | Pending | Pending | Implementation has not started. |
+| T5 | Pending | Pending | Pending | Implementation has not started. |
+
+##### Closure Evidence
+
+- None; implementation has not started.
+
+#### M6 - Add recent and previous-session navigation
+
+Origin: a158012 / M6
+Identity History: none
+GitHub Issue: none
+Status: Not started
+
+##### Summary
+
+Record successful runner destinations so a user can choose a recent location
+or return to the previous distinct runner session. Keep this local state safe
+under concurrent commands and harmless when paths or sessions disappear.
+
+##### Scope
+
+- Add `recent` for a numbered most-recently-used destination list and `last`
+  for the immediately previous distinct runner session.
+- Add only path-marked destinations to `recent`. Track every successfully
+  entered runner session by exact name for `last`, including an unmarked
+  session entered by direct attach or `ls` selection.
+- Keep state below `${XDG_STATE_HOME:-$HOME/.local/state}/tmux-runner` without
+  sourcing or executing its contents.
+- Deduplicate recent destinations while preserving most-recent-first order and
+  exactly the newest 20 canonical paths.
+- Make repeated `last` use alternate between the two most recently entered
+  distinct sessions.
+- Create the state directory with mode `0700` and records with mode `0600`.
+  Serialize concurrent updates with a kernel-released file lock and bounded
+  wait, then replace complete state records atomically.
+- Skip stale paths, missing sessions, malformed lines, and incompatible state
+  safely; do not turn state data into tmux or shell syntax.
+- After `switch-client` returns 0, commit its state update. For blocking
+  outside attachment, stage a transaction immediately before handoff and emit
+  a unique acknowledgment from the same tmux command queue after the client is
+  attached. Commit when the acknowledgment is observed, even if the attached
+  client later exits nonzero; roll back only when the command exits before the
+  acknowledgment and do not overwrite a later concurrent update.
+- Store enough pending transaction data to reconcile after runner process
+  death. On the next state access, commit an acknowledged orphan or roll back
+  an unacknowledged orphan before applying a new update.
+- If the state lock cannot be acquired within five seconds, exit before a tmux
+  connection or state change.
+- Extend help, completion, README state flow, and real concurrency fixtures.
+
+Out of scope: Cross-host synchronization, cloud history, restoring killed
+sessions, unlimited history, and recording commands executed inside tmux.
+
+##### Completion Criteria
+
+- `recent` displays valid destinations in most-recent-first order without
+  duplicate canonical paths, retains exactly the newest 20 entries, and
+  creates or reuses the selected session.
+- After entering distinct sessions A and B, `last` reaches A; another `last`
+  reaches B, and repeated use continues to alternate without creating a new
+  session.
+- Invalid commands, invalid selections, missing targets, and failed entry do
+  not change either recent or previous-session state.
+- Stale or malformed records are skipped with no shell evaluation and do not
+  prevent valid records from working.
+- Concurrent successful updates leave a complete parseable state and retain
+  every successful destination when there are at most 20 distinct paths; with
+  more entries, they retain exactly the newest 20.
+- State paths and modes are correct, lock timeout fails before connection, and
+  a failed outside attach rolls back only its own unacknowledged transaction.
+- State is committed as soon as outside client attachment is acknowledged,
+  remains committed after later abnormal client exit, and recovers an orphan
+  pending transaction according to its recorded acknowledgment.
+- Help, completion, README, installation, and all M1-M5 behavior continue to
+  pass through real tmux, Git, PTY, and filesystem paths.
+
+##### Dependencies And Decisions
+
+- M5 and D18.
+
+##### Implementation Plan
+
+Plan Status: accepted
+Plan Acceptance: 2026-08-23 - accepted recent selection, previous-session
+navigation, XDG state placement, and success-only atomic updates.
+Implementation Authorization: none
+Superseded Plan Artifacts: none
+
+1. Define literal, versioned state records below a mode `0700` XDG state
+   directory, mode `0600` files, and safe parsing for 20 recent paths and the
+   previous-session pair.
+2. Add bounded kernel-released locking and atomic replacement. Commit after a
+   successful switch; for blocking outside attachment, add a unique
+   server-side attach acknowledgment, transaction-aware staging, and
+   acknowledgment-based commit or rollback.
+3. Reconcile acknowledged and unacknowledged orphan transactions before each
+   state read or update.
+4. Add `recent` selection with stale-entry filtering and existing path-based
+   create-or-reuse behavior.
+5. Add `last` lookup and alternating previous/current state transitions without
+   widening its target beyond runner-managed sessions.
+6. Extend help, completion, README, and concurrent real-path tests, then run
+   the complete shipped suite and the stage review cycle.
+
+##### Test Plan
+
+| Label | Layer | Method | Environment | Expected Result |
+| --- | --- | --- | --- | --- |
+| T1 | Recent navigation | Enter path-marked destinations through `create`, `repo`, and `recent`, and enter marked and unmarked sessions through direct `attach` and `ls`; add more than 20 paths and repeat one. | Real Git, filesystem, named tmux server, temporary XDG state | `recent` contains only the newest 20 unique path-marked destinations in MRU order; direct and list entry still update `last`; every valid recent selection reuses or creates the correct session. |
+| T2 | Previous-session navigation | Enter distinct sessions A and B, invoke `last` repeatedly inside and outside the dedicated server, and observe client targets. | Real tmux clients and PTYs | Each call reaches the previous distinct session and repeated calls alternate A and B without creating sessions. |
+| T3 | Failure, acknowledgment, and stale state | Exercise invalid input, lock timeout, deleted paths and sessions, malformed and future-version records, and shell syntax text. For outside attach, test exit before acknowledgment, acknowledged attach followed by server loss and nonzero exit, runner death in the staging window, and runner death after acknowledgment. Interleave another process's successful update before rollback and reconcile each orphan on a later invocation. | Temporary XDG state, filesystem sentinels, real tmux, PTYs, readiness barriers, acknowledgment observer, and state monitor | Invalid and stale cases are safe; only an unacknowledged transaction rolls back; acknowledged entry remains committed after abnormal exit; orphan recovery follows recorded acknowledgment; later successful updates survive rollback; no stored text executes; and lock timeout leaves tmux identity and prior state unchanged. |
+| T4 | Concurrent state | Release a known set of at most 20 distinct successful destinations against shared state while concurrent readers validate records; repeat with more than 20 ordered destinations. | Real tmux, Git, PTYs, readiness barrier, concurrent readers | No partial record or lost update occurs; the first final set and count equal all successful destinations, and the overflow case equals exactly the newest 20. Directory and file modes remain `0700` and `0600`. |
+| T5 | Regression integration | Run all commands, help, completion, installation, repository discovery, identity, and server isolation under the outer cleanup supervisor. | Isolated real tmux, Git, PTYs, and XDG paths | All earlier contracts pass; passing runs leave no state lock, temporary file, socket, process, or workspace; failing runs preserve only the reported diagnostic workspace. |
+
+##### Verification Results
+
+| Label | Observed At | Environment | Result | Evidence |
+| --- | --- | --- | --- | --- |
+| T1 | Pending | Pending | Pending | Implementation has not started. |
+| T2 | Pending | Pending | Pending | Implementation has not started. |
+| T3 | Pending | Pending | Pending | Implementation has not started. |
+| T4 | Pending | Pending | Pending | Implementation has not started. |
+| T5 | Pending | Pending | Pending | Implementation has not started. |
+
+##### Closure Evidence
+
+- None; implementation has not started.
+
+#### M7 - Complete integrated verification and release preparation
+
+Origin: a158012 / M7
+Identity History: none
+GitHub Issue: none
+Status: Not started
+
+##### Summary
+
+Verify the complete local product as one installed system and prepare a clear
+release boundary without creating a tag or GitHub release. Align installation,
+help, completion, README, version identity, and cleanup with the final command
+and data-flow contracts.
+
+##### Scope
+
+- Reverify installation of the runner, Bash completion, and the M3 no-op
+  `tmux.conf`, including the existing-config preservation contract.
+- Audit top-level and command help plus Bash completion for every command,
+  alias, option, session target, repository path, and selection mode.
+- Document the dedicated server, UDS path selection, configuration start time,
+  repository identity, discovery, recent state, previous-session behavior,
+  installation, first use, and complete data flow.
+- Document that existing default-server sessions are neither migrated nor
+  visible to runner commands and give the detach instruction for cross-server
+  client use.
+- Run the full shipped suite through source and installed copies with real
+  tmux servers, PTYs, Git repositories and worktrees, XDG paths, concurrent
+  operations, and controlled cleanup.
+- Confirm that version `0.1.0` and its live or injected Git metadata remain
+  consistent across the source and installed artifacts.
+- Record final stage review evidence and the exact release-ready repository
+  state in this canonical document.
+
+Out of scope: Creating or pushing a Git tag, creating a GitHub release,
+closing a remote milestone, system-wide installation, and adding fzf or
+another selection dependency.
+
+##### Completion Criteria
+
+- Installation into an empty spaced home writes the complete expected file
+  set with correct modes and metadata; a second install preserves an existing
+  local `tmux.conf` byte for byte.
+- Every documented command, option, config path, state path, migration note,
+  and first-use step matches the shipped source and installed behavior.
+- Source and installed version output retain the M2 identity contract and the
+  final version value remains `0.1.0`.
+- The complete suite passes through the real shipped runner and fixtures with
+  no internal-function mock replacing the path under test.
+- Test cleanup leaves no runner or default test server, socket, PTY process,
+  temporary workspace, state lock, or incomplete state record.
+- First-person, third-person, and second-person stage reviews have no accepted
+  finding left unresolved, and the canonical row carries final evidence.
+
+##### Dependencies And Decisions
+
+- M3, M4, M5, M6, and D17.
+
+##### Implementation Plan
+
+Plan Status: accepted
+Plan Acceptance: 2026-08-23 - accepted final installation, documentation,
+integrated verification, and release-preparation scope.
+Implementation Authorization: none
+Superseded Plan Artifacts: none
+
+1. Reverify non-overwriting local installation of every shipped artifact and
+   compare source-to-installed content and modes.
+2. Reconcile help, Bash completion, and README with the final CLI,
+   configuration, state, migration, and data-flow behavior.
+3. Run M7 / T1 through M7 / T4 through the source and installed paths with
+   real tmux, PTY, Git, filesystem, concurrency, version, and cleanup checks
+   under an outer supervisor.
+4. Inspect cleanup and repository state, complete the first-person,
+   third-person, and second-person stage reviews, and commit the reviewed M7
+   artifacts and review evidence.
+5. Run M7 / T5 against that clean committed candidate, then record its result,
+   the carrying commit, and final closure in the closing canonical update;
+   leave tag and GitHub release execution for separate authorization.
+
+##### Test Plan
+
+| Label | Layer | Method | Environment | Expected Result |
+| --- | --- | --- | --- | --- |
+| T1 | Installation | Install into an empty spaced home, inventory all artifacts and modes, compare the installed config with `config/tmux.conf`, modify the installed config, then install again. | GNU Make, temporary spaced `HOME`, XDG paths | The runner is mode `0755`; completion and config are mode `0644`; the first config copy matches the valid no-op source byte for byte; generated runner metadata is valid; and the modified local config is not overwritten. |
+| T2 | Interface and documentation | Execute every help and version form, load completion for each command context, and follow README preparation, installation, first-use, detach, selection, recent, last, and migration instructions. | Source and installed copies in fresh temporary homes | All output and completion sets match the CLI, and every documented command and path produces the stated result. |
+| T3 | Full integration | Run the complete shipped suite across dedicated and default servers, repository identity and discovery, recent state, concurrent creation and updates, and source and installed version fixtures. | Real tmux, Git, linked worktrees, PTYs, FIFOs, XDG paths, bounded timeouts | Every milestone contract passes through the real shipped path with no substitute for internal behavior. |
+| T4 | Isolation and cleanup | Have an outer supervisor observe the child suite's server, client, pane, socket, process, workspace, lock, and state-file manifest before, during, and after exit. | Linux process and filesystem inspection plus real tmux queries | Default-server data remains isolated; a passing run removes or terminates every test-owned resource; a forced failing run terminates processes and preserves and reports its diagnostic workspace. |
+| T5 | Release preparation | Compare the canonical plan, installed inventory, version output, `git status --porcelain`, staged and unstaged diffs, and final stage review evidence without executing a remote mutation. | Clean repository candidate and local installed copy | Version `0.1.0`, documentation, tests, and recorded evidence agree; the candidate has no staged, unstaged, or untracked change; and this workflow has executed no tag or GitHub release mutation. |
+
+##### Verification Results
+
+| Label | Observed At | Environment | Result | Evidence |
+| --- | --- | --- | --- | --- |
+| T1 | Pending | Pending | Pending | Implementation has not started. |
+| T2 | Pending | Pending | Pending | Implementation has not started. |
+| T3 | Pending | Pending | Pending | Implementation has not started. |
+| T4 | Pending | Pending | Pending | Implementation has not started. |
+| T5 | Pending | Pending | Pending | Implementation has not started. |
+
+##### Closure Evidence
+
+- None; implementation has not started.
 
 ## Backlog
 
