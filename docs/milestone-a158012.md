@@ -17,8 +17,10 @@ Canonical branch or ref: master
 Git upstream: origin/master
 Remote tracker: none
 
-Next session entry point: review the completed M3-M7 commits and M7 evidence;
-any tag, push, or GitHub release remains a separately authorized operation.
+Next session entry point: run separately authorized M7 / T1-T4 runtime
+verification against the reviewed follow-up correction, then record the
+carrying commit and run M7 / T5. Tag and GitHub release execution remain
+separate operations.
 
 ## Milestone
 
@@ -32,9 +34,9 @@ any tag, push, or GitHub release remains a separately authorized operation.
 | Identity | M4 | Resolve repository and working-directory identity | Milestone | Complete | No | M3, D16 | Complete 2026-08-24, carrying commit `8caaea1`; M4 / T1-T5 and both requested reviews accepted; [detail](#m4---resolve-repository-and-working-directory-identity) |
 | Discovery | M5 | Discover configured repositories and select one | Milestone | Complete | No | M4, D15, D17 | Complete 2026-08-24, carrying commit `71ce91f`; M5 / T1-T5 and both requested reviews accepted; [detail](#m5---discover-configured-repositories-and-select-one) |
 | Navigation | M6 | Add recent and previous-session navigation | Milestone | Complete | No | M5, D18 | Complete 2026-08-24, carrying commit `1a46fca`; M6 / T1-T5 and both requested reviews accepted; [detail](#m6---add-recent-and-previous-session-navigation) |
-| Integration | M7 | Complete integrated verification and release preparation | Milestone | Complete | No | M3, M4, M5, M6, D17 | Complete 2026-08-24, carrying commit `ae23625`; M7 / T1-T5 and the complete stage review cycle accepted; [detail](#m7---complete-integrated-verification-and-release-preparation) |
+| Integration | M7 | Complete integrated verification and release preparation | Milestone | In progress | No | M3, M4, M5, M6, D17, D19, D20, D21, D22, D23, D24, D25, D26, D27, D28 | Follow-up implementation, authorized static checks, and both final static reviews completed 2026-08-25; M7 / T1-T5 remain Pending; prior commit `ae23625` remains historical verification evidence; [detail](#m7---complete-integrated-verification-and-release-preparation) |
 
-Milestone tally: Complete 7, In progress 0, Not started 0.
+Milestone tally: Complete 6, In progress 1, Not started 0.
 
 ### Decisions
 
@@ -58,6 +60,16 @@ Milestone tally: Complete 7, In progress 0, Not started 0.
 | D16 | Starting with M4, supersede D1 for Git working trees while preserving D1 for non-Git directories. For an automatically derived name, use `<repo>-<short-hostname>` when the canonical repository name is unique and prepend the minimum distinguishing parent path on a known collision. If distinct paths still normalize to one name, append a deterministic canonical-path SHA-256 suffix, beginning with 12 hexadecimal characters and extending it if required. Store the canonical path in `@tmux-runner-path` and use path identity before an automatically derived name. Preserve explicit `-s` as name-directed: allow more than one explicit name for one path, but fail instead of choosing among multiple path matches or reusing an occupied name whose path is missing or different. | 2026-08-23 |
 | D17 | Read repository search roots from `${XDG_CONFIG_HOME:-$HOME/.config}/tmux-runner/repos` as one absolute path per line without shell evaluation; ignore blank lines and full-line comments, canonicalize and deduplicate roots, and warn and skip missing roots. Keep tmux settings in the adjacent `tmux.conf`. | 2026-08-23 |
 | D18 | Add a 20-entry recent path list and previous-session navigation under `${XDG_STATE_HOME:-$HOME/.local/state}/tmux-runner`. Record only path-marked sessions in `recent`, allow any successfully entered runner session in `last`, serialize and atomically replace state, and ignore stale records safely. After a successful `switch-client`, update state. For blocking outside attach, stage a transaction and use a server-side acknowledgment after client attachment; commit an acknowledged transaction even if the client later exits abnormally, roll back only an unacknowledged failure, and reconcile orphan transactions on the next state access. | 2026-08-23 |
+| D19 | Starting with the reopened M7 correction, store the full dedicated-server socket path with each state version 2 session entry, keep the two newest distinct sessions per server, and make `last` read only the selected server's entries. Keep recent paths global across runner servers and exclude unscoped version 1 session entries during migration. | 2026-08-24 |
+| D20 | Starting with the reopened M7 correction, store each recent path with its `git` or `plain` kind and retain that kind for the path. Exclude a path when its kind changes. During version 1 migration, classify accessible paths with the current Git boundary and exclude paths that are inaccessible or cannot be classified because Git is unavailable. | 2026-08-24 |
+| D21 | Starting with the reopened M7 correction, exclude repository paths containing a newline from the line-oriented repository catalog and report the skipped path with percent encoding. Continue to support encoded newlines in navigation state for paths entered directly with `create`. | 2026-08-24 |
+| D22 | Starting with the reopened M7 correction, require exactly one supported version row in the main state record, accept valid known state rows independently, and remove ignored malformed or unknown rows on the next successful rewrite. Parse `pending` and `ack` transaction records strictly: reject missing, duplicate, unknown, or raw-tab rows and never apply a rejected transaction to the main state. | 2026-08-24 |
+| D23 | Starting with the reopened M7 correction, reconcile orphan transactions at the start of every state access before interactive input validation. Commit a previously acknowledged entry and clean an unacknowledged transaction first; after that recovery, invalid input records no new navigation event. | 2026-08-24 |
+| D24 | Starting with the follow-up M7 correction, narrow D9 only at final entry: resolve `=<normalized-name>` once to a transient tmux session ID, then use that ID for entry and acknowledgment validation. Pass it to `__state-ack` without adding it to the main, pending, or acknowledgment record formats. Retain the existing on-disk transaction schema and its transaction-ID binding. | 2026-08-24 |
+| D25 | Starting with the follow-up M7 correction, treat `RUNNER_INSTALL_DATE="unreleased"` as the source-copy condition for live Git resolution. Permit installation when source Git identity is unavailable by stamping an `unknown` hash and commit date with the real installation date; an installed copy must never adopt Git identity from its surrounding directory. | 2026-08-24 |
+| D26 | Starting with the follow-up M7 correction, keep the exact selected session name stable from transient-ID resolution through final entry. In the same tmux server queue, require the ID to retain both the selected name and raw path marker before entry; a rename, missing ID, or changed marker fails without client entry, acknowledgment, or navigation-state change. | 2026-08-24 |
+| D27 | Before snapshotting an unmarked selected session, normalize its absent local path marker to the reserved `tmux-runner-unmarked` value with `set-option -oq`, then read the marker again through the selected ID. Treat that value as semantically unmarked, keep it out of recent paths and state formats, and apply the same final raw-marker guard used for path markers. | 2026-08-25 |
+| D28 | Run the final global fallback and identity guard inside a transaction-named temporary user hook stored on the selected session ID. Remove its definition at payload start, run it once with `set-hook -R` on that ID, and remove it again from the outer queue. Commands inserted by the hook do not fire command after-hooks, so `after-set-option` cannot change `tmux-runner-global-unset` before the guard. | 2026-08-25 |
 
 ### Milestone Details
 
@@ -782,7 +794,7 @@ Superseded Plan Artifacts: none
 Origin: a158012 / M7
 Identity History: none
 GitHub Issue: none
-Status: Complete
+Status: In progress
 
 ##### Summary
 
@@ -807,13 +819,22 @@ and data-flow contracts.
   tmux servers, PTYs, Git repositories and worktrees, XDG paths, concurrent
   operations, and controlled cleanup.
 - Confirm that version `0.1.0` and its live or injected Git metadata remain
-  consistent across the source and installed artifacts.
+  consistent across the source and installed artifacts, including an installed
+  copy whose source Git identity is unavailable.
+- Isolate installed metadata and the complete test process from ambient
+  `GIT_DIR` and `GIT_WORK_TREE` values.
+- Bind every final session entry to one transient tmux session ID and recheck
+  the selected name and raw path marker in the server command queue before
+  entry.
+- Keep the main, pending, and acknowledgment record formats unchanged while
+  making canonical writer validation reject every unowned row.
 - Record final stage review evidence and the exact release-ready repository
   state in this canonical document.
 
 Out of scope: Creating or pushing a Git tag, creating a GitHub release,
 closing a remote milestone, system-wide installation, and adding fzf or
-another selection dependency.
+another selection dependency. Adding a session ID to the main, pending, or
+acknowledgment record format is also out of scope.
 
 ##### Completion Criteria
 
@@ -823,7 +844,16 @@ another selection dependency.
 - Every documented command, option, config path, state path, migration note,
   and first-use step matches the shipped source and installed behavior.
 - Source and installed version output retain the M2 identity contract and the
-  final version value remains `0.1.0`.
+  final version value remains `0.1.0`. An installed copy with unavailable
+  source Git identity reports its stamped `unknown` identity and never reports
+  a surrounding Git working tree as live.
+- Ambient Git controls do not change installed metadata or the repository
+  identity used by the complete test process.
+- Every command enters the session ID resolved from its exact selected name.
+  A missing ID, renamed session, or changed raw marker fails before client
+  entry and records no navigation event.
+- Canonical state validation accepts only rows emitted by the shipped writer;
+  the existing main and transaction schema versions remain unchanged.
 - The complete suite passes through the real shipped runner and fixtures with
   no internal-function mock replacing the path under test.
 - Test cleanup leaves no runner or default test server, socket, PTY process,
@@ -833,9 +863,239 @@ another selection dependency.
 
 ##### Dependencies And Decisions
 
-- M3, M4, M5, M6, and D17.
+- M3, M4, M5, M6, D17, D19, D20, D21, D22, D23, D24, D25, D26, D27,
+  and D28.
+
+##### Reopened Findings
+
+Review Date: 2026-08-24
+Review Method: static conceptual-integrity review of commits `89095fb` through
+`2f88363`; no runner or test execution
+
+- M7 / T4 exercises live observation and forced failure only through the
+  source runner even though the accepted plan requires source and installed
+  paths (`tests/test-tmux-runner.bash:5702`,
+  `tests/test-tmux-runner.bash:5902`).
+- M5 / T2 displays normalized-parent hash collisions but does not select those
+  repositories in opposite orders on fresh servers as required by its test
+  plan (`tests/test-tmux-runner.bash:4299`,
+  `tests/test-tmux-runner.bash:4387`).
+- Previous-session state stores only a session name while `TMUX_TMPDIR`
+  selects the runner server, so `last` can resolve state against a different
+  server identity (`bin/tmux-runner:281`, `bin/tmux-runner:2598`).
+- Repository and recent selections perform work between their final path
+  check and the tmux entry operation, contrary to the documented immediate
+  recheck boundary (`bin/tmux-runner:2488`, `bin/tmux-runner:2578`).
+- Git path resolution and catalog validation inherit `GIT_DIR` and
+  `GIT_WORK_TREE`, allowing ambient Git controls to replace the requested
+  folder identity (`bin/tmux-runner:1371`, `bin/tmux-runner:1741`).
+- Recent state stores a path without its Git or plain-directory kind, so a Git
+  working tree changed into a plain directory at the same path remains
+  eligible despite the documented Git-identity check
+  (`bin/tmux-runner:2522`, `README.md:213`).
+
+##### Follow-up Conceptual-Integrity Findings
+
+Review Date: 2026-08-24
+Review Method: static review of all tracked files in the current working tree;
+no runner, tmux command, or test execution
+
+- The installed-version injector accepts an explicit source repository but
+  inherits `GIT_DIR` and `GIT_WORK_TREE`, so installed metadata can describe a
+  different repository (`configure/inject-runner-version.bash:74`,
+  `Makefile:23`).
+- The test process also inherits those variables before creating real Git
+  fixtures and calculating expected source identity, so an ambient repository
+  can invalidate the verification boundary (`tests/test-tmux-runner.bash:1`,
+  `tests/test-tmux-runner.bash:415`).
+- The canonical state validator accepts an `applied` row that neither the
+  shipped writer nor parser owns, allowing a non-canonical writer regression
+  to pass that check (`tests/test-tmux-runner.bash:1747`,
+  `bin/tmux-runner:688`).
+- The injector can stamp `RUNNER_GIT_HASH="unknown"` together with a real
+  installation date, but the installed runner interprets that hash as a live
+  source placeholder and can adopt identity from a different surrounding Git
+  working tree (`configure/inject-runner-version.bash:39`,
+  `bin/tmux-runner:134`).
+- A session path marker is checked before state staging, but entry still uses
+  the session name after that check. A same-name replacement or marker change
+  before `switch-client` or `attach-session` may therefore enter a session
+  that was not verified (`bin/tmux-runner:2619`, `bin/tmux-runner:2468`,
+  `bin/tmux-runner:2522`). This remains a hypothesis until the real concurrent
+  tmux path runs.
+- The draft session-entry test does not isolate the transient-ID and raw-marker
+  invariants. A replacement with a different marker can pass without proving
+  ID targeting, while a marker change to a different decoded path can pass
+  without proving raw equality (`docs/milestone-a158012.md:1079`,
+  `bin/tmux-runner:1618`).
+- The draft acknowledgment check compares the transient ID with the pending
+  session name only after entry. A rename that retains the same ID and marker
+  can therefore enter before acknowledgment rejects it
+  (`docs/milestone-a158012.md:965`, `bin/tmux-runner:1516`).
 
 ##### Implementation Plan
+
+Plan Status: accepted
+Plan Acceptance: 2026-08-25
+Implementation Authorization: 2026-08-25
+Superseded Plan Artifacts: none; the accepted reopened correction plan is
+preserved below.
+
+1. Clear `GIT_DIR` and `GIT_WORK_TREE` at the installed-version injector and
+   test-process boundaries while retaining the cases that set them explicitly
+   for one runner child.
+2. Resolve live Git metadata only when `RUNNER_GIT_HASH` is `unknown` and
+   `RUNNER_INSTALL_DATE` is `unreleased`. Let the injector retain an `unknown`
+   source hash and commit date when Git identity is unavailable while stamping
+   the real installation date, so that installed output remains immutable and
+   never adopts a surrounding Git working tree.
+3. Remove the test-only `applied` allowance from the canonical state validator
+   and require writer output to contain only the rows owned by the shipped
+   state format.
+4. For `create`, `c`, `repo`, `recent`, `ls`, `attach`, `a`, and `last`, resolve
+   the exact selected session name once to tmux `#{session_id}`. If its local
+   path marker is absent, normalize it to the reserved
+   `tmux-runner-unmarked` value with `set-option -oq` and read it again through
+   that ID. Retain the raw marker and exact selected name, and use only the ID
+   as the remaining tmux target. Keep the ID and raw marker in process memory
+   and out of every state record.
+5. At the shared final entry seam, revalidate filesystem path and kind when a
+   path-backed command supplies them. Build a unique session-local user hook
+   from the validated pending transaction ID and store it on the selected
+   session ID. Its payload first removes its own definition, sets the global
+   `@tmux-runner-path` option to the invalid reserved value
+   `tmux-runner-global-unset`, then uses server-side `if-shell -F` targeted at
+   the same session ID to compare its current exact name and raw marker with
+   their snapshots. Run the hook once with `set-hook -R` and remove it again
+   from the outer queue, targeting that ID for definition, execution, and
+   cleanup. Commands inserted by the hook do not fire command after-hooks, so
+   `after-set-option` cannot interpose between fallback assignment and guard.
+   A missing local marker inherits the invalid global value and fails
+   comparison. Insert `switch-client` or `attach-session` and the
+   acknowledgment command immediately after a true guard. Escape `#`, `,`,
+   and `}` when inserting a marker literal into a tmux format, and quote every
+   value that crosses the nested hook parser. Treat a missing acknowledgment
+   as failure so a missing ID, rename, or false marker guard cannot report
+   success.
+6. Pass the validated session ID to `__state-ack`. Have that command load the
+   pending server, session name, and decoded path, require the pending server to
+   match the selected socket, and query the ID for its current name and raw
+   marker. Require the name to match the pending name. When the current marker
+   is absent or exactly `tmux-runner-unmarked`, require the pending path to be
+   empty; otherwise decode the marker through the existing compatibility path
+   and compare that decoded value with the pending path before publishing the
+   existing transaction-bound acknowledgment. Keep raw byte-for-byte marker
+   equality in the pre-entry
+   server-queue guard. Do not add the ID or raw marker to the main, pending,
+   acknowledgment, or acknowledgment-ticket formats, and retain the existing
+   strict parsers and orphan-recovery compatibility.
+7. Add source and installed real-path cases that start the complete test
+   process with ambient Git controls, invoke both installation and the version
+   injector against a different ambient repository, and retain the deliberate
+   one-child ambient runner cases. Install from a source copy outside any Git
+   working tree into a `HOME` that is itself a different Git working tree, then
+   require the installed command under that `HOME` to retain the stamped
+   `unknown` identity. Build the canonical-row check from a real writer-produced
+   state record and require an appended `applied` row to make the validator
+   fail.
+8. Exercise every command family through the shared session-ID entry path.
+   Insert real tmux barriers before outside attachment and inside switching;
+   force concurrent normalization of an unmarked session and then remove its
+   reserved marker after snapshot while the global option holds that same
+   reserved value. Configure a real `after-set-option` hook that restores the
+   colliding value, then require the temporary entry hook to suppress that
+   command after-hook, retain `tmux-runner-global-unset`, reject entry, and
+   leave no temporary hook. Require concurrent state transactions to use
+   distinct hook names derived from their own transaction IDs;
+   replace the selected session under the same name while preserving its raw
+   marker to isolate ID targeting. Separately change the marker between legacy
+   and `v1:` forms for the same decoded canonical path to isolate raw equality,
+   and rename the selected session while preserving its ID and marker. Require
+   every identity change to produce no client entry, acknowledgment, or
+   navigation-state update. Include marker paths containing `#`, `,`, `}`, a
+   single quote, and a semicolon to pin format and nested-command parsing.
+9. Update README version, data flow, and state documentation for stamped
+   `unknown` installations, transient session-ID targeting, the server-side
+   name and marker guard, acknowledgment validation, and the unchanged on-disk
+   formats. Update internal trace expectations without changing the name-based
+   CLI, help, or Bash completion contract.
+10. Run `bash -n` separately on `bin/tmux-runner`,
+    `bin/tmux-runner-completion.bash`,
+    `configure/inject-runner-version.bash`, and
+    `tests/test-tmux-runner.bash`. Run ShellCheck on those same files, forcing
+    the Bash dialect for the completion file, then run `git diff --check` from
+    the repository root. These are the only checks authorized at this point;
+    keep M7 / T1-T4 Pending until runner, tmux, and test execution is separately
+    authorized.
+
+##### Follow-up Correction Implementation Status
+
+- Steps 1-9 are represented in the runner, version injector, shipped test
+  suite, README, and canonical M7 plan without changing the name-based CLI,
+  completion interface, or on-disk state formats.
+- On 2026-08-25, separate `bash -n` checks passed for the runner, completion,
+  version injector, and test script. Separate ShellCheck runs passed for the
+  same four files, with the Bash dialect selected explicitly for completion;
+  `git diff --check` also passed.
+- The first-person retrospective confirmed the transient-ID, name, and raw
+  marker boundary and corrected an early gate-observation race, a test-built
+  marker value, an overbroad state-documentation claim, and an over-specific
+  missing-acknowledgment message. D27 provides explicit local normalization
+  before the raw-marker snapshot. D28 moves the invalid global fallback and
+  final guard into a transaction-named temporary session hook so
+  `after-set-option` cannot interpose. It reported no unresolved decision
+  within the authorized static scope.
+- On 2026-08-25, the final static third-person and second-person reviews
+  accepted the frozen files with no remaining finding.
+- No runner command, tmux server, session, or query operation, integration
+  fixture, or complete shipped suite has been executed for this follow-up
+  correction. A version-only `tmux -V` invocation created no server or session
+  and provides no M7 runtime evidence.
+
+##### Accepted Reopened Correction Plan
+
+Plan Status: accepted
+Plan Acceptance: 2026-08-24 - accepted correction of all six confirmed
+conceptual-integrity findings under reopened M7.
+Implementation Authorization: 2026-08-24 - full correction implementation
+authorized; D19-D23 record the completed decisions for their dependent changes
+Superseded Plan Artifacts: none; the completed initial M7 plan is preserved
+below.
+
+1. Extend the M5 normalized-collision selection and M7 live-observation tests
+   so every previously claimed source and installed path is represented by a
+   real shipped-path fixture.
+2. Isolate folder identity from ambient `GIT_DIR` and `GIT_WORK_TREE`, and add
+   create, repository, recent, and source-version coverage for that boundary.
+3. Store the full runner socket path with previous-session state and keep
+   `last` lookup within the selected runner server.
+4. Move repository and recent identity checks to the final shared entry seams
+   before session reuse or creation, retaining early checks only for prompt
+   feedback.
+5. Store Git or plain-directory kind with each recent path and reject a stored
+   destination whose kind changes before listing or entry.
+6. Exclude newline repository paths from the line-oriented catalog, keep the
+   main state parser row-tolerant, and make transaction records strict.
+7. For state-backed selection paths, reconcile acknowledged orphans before
+   interactive input validation, update README and state documentation, and
+   leave all runtime verification pending until execution is separately
+   authorized.
+
+##### Prior Correction Implementation Status
+
+- The six reopened findings and D19-D23 are represented in the runner, shipped
+  test suite, README, and this canonical plan.
+- D22 shipped-path coverage now rejects missing, duplicate, unknown, and
+  raw-tab rows in both pending and acknowledgment records without replacing a
+  locked pending record.
+- `bash -n`, ShellCheck, and `git diff --check` passed on 2026-08-24 against
+  the prior-correction working files.
+- One independent static reviewer examined the corrected D22 test paths and
+  the D23 state-access boundary and reported no blocking or minor finding.
+- No runner, tmux command, integration fixture, or complete shipped suite has
+  been executed for the reopened correction.
+
+##### Completed Implementation Plan
 
 Plan Status: accepted
 Plan Acceptance: 2026-08-23 - accepted final installation, documentation,
@@ -861,13 +1121,23 @@ Superseded Plan Artifacts: none
 
 | Label | Layer | Method | Environment | Expected Result |
 | --- | --- | --- | --- | --- |
-| T1 | Installation | Install into an empty spaced home, inventory all artifacts and modes, compare the installed config with `config/tmux.conf`, modify the installed config, then install again. | GNU Make, temporary spaced `HOME`, XDG paths | The runner is mode `0755`; completion and config are mode `0644`; the first config copy matches the valid no-op source byte for byte; generated runner metadata is valid; and the modified local config is not overwritten. |
-| T2 | Interface and documentation | Execute every help and version form, load completion for each command context, and follow README preparation, installation, first-use, detach, selection, recent, last, and migration instructions. | Source and installed copies in fresh temporary homes | All output and completion sets match the CLI, and every documented command and path produces the stated result. |
-| T3 | Full integration | Run the complete shipped suite across dedicated and default servers, repository identity and discovery, recent state, concurrent creation and updates, and source and installed version fixtures. | Real tmux, Git, linked worktrees, PTYs, FIFOs, XDG paths, bounded timeouts | Every milestone contract passes through the real shipped path with no substitute for internal behavior. |
-| T4 | Isolation and cleanup | Have an outer supervisor observe the child suite's server, client, pane, socket, process, workspace, lock, and state-file manifest before, during, and after exit. | Linux process and filesystem inspection plus real tmux queries | Default-server data remains isolated; a passing run removes or terminates every test-owned resource; a forced failing run terminates processes and preserves and reports its diagnostic workspace. |
+| T1 | Installation | Install into an empty spaced home and invoke the shipped version injector while `GIT_DIR` and `GIT_WORK_TREE` select another repository. Repeat from a source copy outside every Git working tree while `HOME` is the root of a different Git working tree, so the installed runner resides below that unrelated repository. Inventory all artifacts and modes, compare the installed config with `config/tmux.conf`, modify the installed config, then install again. | GNU Make, temporary spaced `HOME`, XDG paths, source and ambient Git repositories, and a source copy without readable Git identity | The runner is mode `0755`; completion and config are mode `0644`; normal installation and direct injection identify the explicit source repository; the no-Git installation reports `tmux-runner version 0.1.0 (unknown)`, `commit date:  unknown`, and a parseable UTC installation date within the install interval, with no `(live)` marker or surrounding-repository identity; the first config copy matches the valid no-op source byte for byte; and the modified local config is not overwritten. |
+| T2 | Interface and documentation | Execute every help and version form, load completion for each command context, and follow README preparation, installation, first-use, detach, selection, recent, last, migration, stamped `unknown` identity, transient session-ID entry, name and marker guard, and acknowledgment instructions. | Source and installed copies in fresh temporary homes | All output and completion sets match the name-based CLI; documentation matches source and installed identity, transient ID targeting, and the unchanged on-disk record formats. |
+| T3 | Full integration | Start the complete shipped suite with ambient Git controls and run source and installed variants. Cover normalized-collision selection in both orders, canonical writer and validator rows, every command family's session-ID entry, concurrent reserved-marker normalization, reserved-marker removal after snapshot while the global option holds the same value and a real `after-set-option` hook restores it, transaction-derived session-local hook names and cleanup under concurrent state entry, same-name replacement with an identical raw marker, `v1:`-to-legacy marker change with the same decoded path, session rename with the same ID and marker, marker paths containing `#`, `,`, `}`, a single quote, and a semicolon, final path revalidation, server-scoped state version 2, recent kinds and migration, unchanged strict transaction records, and orphan recovery before invalid selection handling. | Real tmux, Git, linked worktrees, PTYs, FIFOs, XDG paths, source and ambient repositories, controlled entry barriers, bounded timeouts | Every milestone and reopened-correction contract passes through the real shipped path; the temporary entry hook prevents `after-set-option` from restoring a colliding marker, leaves `tmux-runner-global-unset`, and removes its own option; reserved-marker removal, ID replacement, raw-marker change, and rename each fail independently without client entry, acknowledgment, or navigation-state change; concurrent transactions use distinct temporary hooks; canonical validation rejects an appended unowned row; no substitute replaces internal behavior. |
+| T4 | Isolation and cleanup | For both source and installed runners, have an outer supervisor observe the child suite's server, client, pane, socket, process, workspace, lock, and state-file manifest before, during, and after normal and forced-failure exit. | Linux process and filesystem inspection plus real tmux queries | Default-server data remains isolated; each passing source and installed run removes or terminates every test-owned resource; each forced-failure run terminates processes and preserves and reports its diagnostic workspace. |
 | T5 | Release preparation | Compare the canonical plan, installed inventory, version output, `git status --porcelain`, staged and unstaged diffs, and final stage review evidence without executing a remote mutation. | Clean repository candidate and local installed copy | Version `0.1.0`, documentation, tests, and recorded evidence agree; the candidate has no staged, unstaged, or untracked change; and this workflow has executed no tag or GitHub release mutation. |
 
 ##### Verification Results
+
+| Label | Observed At | Environment | Result | Evidence |
+| --- | --- | --- | --- | --- |
+| T1 | Not run | Reopened correction candidate | Pending | Installation verification requires separate runtime authorization. |
+| T2 | Not run | Reopened correction candidate | Pending | Interface and README verification requires separate runtime authorization. |
+| T3 | Not run | Reopened correction candidate | Pending | The source and installed shipped suites have not run for this correction. |
+| T4 | Not run | Reopened correction candidate | Pending | Source and installed observation and forced-failure paths have not run for this correction. |
+| T5 | Not run | Reopened correction candidate | Pending | Release preparation requires a reviewed, committed, clean candidate. |
+
+##### Prior Candidate Verification Results
 
 | Label | Observed At | Environment | Result | Evidence |
 | --- | --- | --- | --- | --- |
@@ -878,6 +1148,13 @@ Superseded Plan Artifacts: none
 | T5 | 2026-08-24 | Clean commit `ae23625`, fresh spaced `HOME` and XDG installation, GNU Make, and local Git worktree, index, and tag inspection | Pass | Before and after installation the worktree and index were clean; the exact three installed files and modes matched; source and installed content, version `0.1.0`, commit identity, and dates agreed; T1-T4 and all stage reviews were present in the candidate; and local tags remained unchanged. |
 
 ##### Closure Evidence
+
+- Prior-correction independent static review acceptance remains historical
+  evidence. The follow-up final static third-person and second-person reviews
+  accepted the correction with no remaining finding. Runtime verification, a
+  carrying commit record, and final closure remain pending.
+
+##### Prior Candidate Closure Evidence
 
 - `bash tests/test-tmux-runner.bash` passed 30 source checks, 30 installed
   checks, full source-to-install integration, and live success and failure

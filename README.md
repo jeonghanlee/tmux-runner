@@ -18,11 +18,35 @@ absent, the runner supplies `/dev/null`, excluding system and general user
 tmux configuration. Changes to the local file take effect the next time the
 dedicated server starts.
 
-Every session lookup uses an exact tmux target. Outside tmux, a successful
-command uses `attach-session`. Inside the dedicated server, it uses
-`switch-client`. A session command started inside another tmux server exits
-with an instruction to detach and rerun it from the outer shell before it
-queries or starts the dedicated server.
+The name-based interface resolves each selected exact session name once to
+tmux `#{session_id}`. If that ID has no local path marker, the runner first
+stores the reserved value `tmux-runner-unmarked` with `set-option -oq` and
+reads the marker again. Concurrent normalization is therefore idempotent, and
+the reserved value continues to mean that the session has no canonical path.
+The runner then retains the selected name, transient ID, and raw marker value
+in process memory. Only the transient ID is used as the remaining tmux target.
+The selected name continues to use the existing pending and main navigation
+fields; the transient ID and raw marker are not written to any state record.
+A session command started inside another tmux server exits with an instruction
+to detach and rerun it from the outer shell before it queries or starts the
+dedicated server.
+
+Immediately before client entry, the runner creates a session-local user hook
+named from the pending transaction ID, runs it once with `set-hook -R`, and
+removes it. Targeting the selected session ID for all three operations keeps
+the hook lookup on the identity already resolved by the runner. The hook
+removes its own stored definition first, then sets the global
+`@tmux-runner-path` value to the invalid reserved value
+`tmux-runner-global-unset` and runs a non-shell `if-shell -F` guard targeted at
+the selected ID. tmux executes commands inserted by a hook without firing
+their command after-hooks, so `after-set-option` cannot change the fallback
+between that assignment and the guard. Every valid local marker differs from
+the fallback; removing a local marker therefore inherits the invalid value and
+fails the guard. The guard also requires the ID's current exact name and raw
+local marker value to match their snapshots. Its true branch queues
+`attach-session` outside tmux or `switch-client` inside the dedicated server,
+followed immediately by the acknowledgment command. A false guard or missing
+acknowledgment makes the runner fail without updating navigation state.
 
 For `create`, the runner resolves the requested directory to a physical path.
 Inside Git, real Git metadata supplies the working-tree top level; a linked
@@ -52,8 +76,11 @@ Git to validate working-tree identity. Their automatic session names also
 require `hostname`; `sha256sum` is required when parent components cannot
 produce an available distinct name, including normalized path collisions.
 `repo`, catalog-aware automatic `create`, and catalog-aware `recent` also
-require `find` and `sort`. `ls` and `attach` do not use Git, `hostname`,
-`sha256sum`, `find`, or `sort`.
+require `find` and `sort`. `ls` and `attach` do not require Git, `hostname`,
+`sha256sum`, `find`, or `sort`; when Git is available, entry into a marked
+session uses it to classify that path before updating `recent`. A present
+session marker must be the reserved `tmux-runner-unmarked` value, a legacy
+absolute path, or a valid `v1:` value; other values are rejected before entry.
 
 Installation additionally requires GNU Make, `install`, `date`, and `sed` to
 copy the runner and stamp its Git and installation metadata. Confirm that the
@@ -147,8 +174,9 @@ tmux-runner a -- <session-name>
 Use `--` before a positional session name that begins with `-`.
 
 Every supplied or derived session name replaces `.` and `:` with `_`.
-Attachment, switching, and existence checks use tmux's exact-match `=` prefix,
-so a shorter name does not select a longer session with the same prefix.
+Name resolution and existence checks use tmux's exact-match `=` prefix, so a
+shorter name does not select a longer session with the same prefix. Final
+attachment and switching use the resolved transient session ID.
 
 ## Repository Catalog
 
@@ -169,10 +197,12 @@ the remaining roots. A missing file or a file without usable roots makes
 
 Discovery includes a configured root that is itself a Git working tree,
 nested working trees, and linked worktrees. Bare repositories and ordinary
-directories are excluded. Overlapping roots and symbolic-link aliases do not
-duplicate results, and directory symlinks are not followed. `repo` prints each
-stable label together with the complete canonical path, then always waits for
-a number, even when there is one result.
+directories are excluded. A repository path containing a newline is also
+excluded with an encoded warning because each numbered catalog entry occupies
+one terminal line. Overlapping roots and symbolic-link aliases do not duplicate
+results, and directory symlinks are not followed. `repo` prints each stable
+label together with the complete canonical path, then always waits for a
+number, even when there is one result.
 
 When repository basenames collide, catalog labels add the minimum parent
 components required to distinguish the complete catalog. Labels that still
@@ -181,7 +211,7 @@ SHA-256 prefix. The catalog therefore gives the same new session name
 regardless of selection order. Automatic `create` uses the same label for a
 catalogued path, while any existing exact path-marked session is reused under
 its current name. The selected path and real Git top level are checked again
-immediately before any tmux change.
+immediately before client or session entry.
 
 `tmux-runner ls` remains a selector for current sessions only; it does not show
 repository catalog entries.
@@ -206,13 +236,18 @@ entry makes A current and B previous, so the next `last` enters B. Repeated
 calls therefore alternate between the two most recently entered distinct
 sessions without creating a session. If the previous session no longer
 exists, `last` reports its exact name and leaves navigation state unchanged.
+Session history is keyed by the full dedicated-server socket path derived from
+`TMUX_TMPDIR`; `last` never uses history recorded for another runner server.
 
-`recent` records only sessions carrying `@tmux-runner-path`. Direct
-attachment and `ls` selection of an unmarked session still update `last` but
-do not add a path to `recent`. The state keeps exactly the newest 20 distinct
-canonical paths in most-recent-first order. Missing paths and paths whose
-physical or Git identity changed are skipped. A selected path is checked
-again immediately before any tmux change.
+`recent` records only sessions whose marker carries a canonical path. Direct
+attachment and `ls` selection of a semantically unmarked session still update
+`last` but do not add a path to `recent`; its reserved marker has no path. The
+state keeps exactly the newest 20 distinct canonical paths in
+most-recent-first order. Missing paths and paths whose
+physical identity changed are skipped. Each entry also retains whether the
+path was a Git working-tree root or a plain directory; a path whose kind has
+changed is skipped. A selected path is checked again immediately before client
+or session entry.
 
 The state directory is
 `${XDG_STATE_HOME:-$HOME/.local/state}/tmux-runner`, mode `0700`. The main
@@ -221,16 +256,45 @@ versioned text; percent, carriage return, tab, and newline bytes are encoded
 as `%25`, `%0D`, `%09`, and `%0A`. State is parsed as data and is never
 sourced or evaluated by a shell.
 
+State version 2 stores the server socket identity with each session entry and
+the `git` or `plain` kind with each recent entry. When version 1 state is read,
+its unscoped session entries are excluded. Accessible recent paths are assigned
+their current kind when Git is available; inaccessible paths and paths that
+cannot be classified without Git are excluded. The next successful state
+update writes the retained paths in version 2 format. Recent paths remain
+shared across runner server identities.
+
+The main state record requires exactly one supported version row, then accepts
+valid known rows independently. Malformed and unknown rows are ignored and are
+removed by the next successful canonical rewrite. Transaction `pending` and
+`ack` records are strict: every required row must appear exactly once, no
+unknown row or raw tab field is accepted, and a rejected transaction is never
+applied to the main state.
+
 Updates lock the state directory inode for at most five seconds and replace
-the complete main record atomically. Outside tmux, the runner stages one
-pending event immediately before attachment and queues a non-background
-`run-shell` acknowledgment after `attach-session` in the same tmux command
-queue. The parent commits as soon as that acknowledgment appears, even while
-the client remains attached. A later server or client failure does not erase
-an acknowledged entry. The next state access commits an acknowledged orphan
-or removes only an unacknowledged orphan; it never restores an older state
-snapshot over a concurrent success. An unsupported state version fails
+the complete main record atomically. The runner stages one pending event before
+the final server-side identity guard. Its transaction ID also names the
+temporary session-local hook that contains the global invalid fallback, guard,
+client entry, and non-background `run-shell` acknowledgment. The hook removes
+its definition before those commands run, and the outer command queue also
+removes it after `set-hook -R`. The acknowledgment receives the transient
+session ID, requires its current name to match the pending name, and compares
+an absent or reserved unmarked marker with an empty pending path or a decoded
+path marker with the pending canonical path. The ID and raw marker are not
+added to the main, pending, acknowledgment, or acknowledgment-ticket formats.
+
+The parent commits as soon as that acknowledgment appears, even while an
+outside client remains attached. A later server or client failure does not
+erase an acknowledged entry. The next state access commits an acknowledged
+orphan or removes only an unacknowledged orphan; it never restores an older
+state snapshot over a concurrent success. An unsupported state version fails
 without changing the record or contacting tmux.
+
+Orphan recovery is part of state access and runs before a state-backed command
+validates an interactive selection. An invalid selection records no new
+navigation event, but the main state may still change if that access commits a
+previously acknowledged orphan. Cleanup of an unacknowledged orphan does not
+change the main state.
 
 ## Help
 
@@ -260,8 +324,9 @@ installation date:
 tmux-runner --version
 ```
 
-When executed directly from the repository, the Git identity is resolved from
-the live working tree. A tracked modification adds the `-dirty` suffix:
+When the source template still contains both an `unknown` hash and an
+`unreleased` installation date, the Git identity is resolved from the live
+working tree. A tracked modification adds the `-dirty` suffix:
 
 ```text
 tmux-runner version 0.1.0 (<hash> (live))
@@ -269,9 +334,20 @@ commit date:  <commit-date>
 install date: live
 ```
 
-`make install` stamps the installed copy with the source Git identity, commit
-date, and installation date. The installed command therefore retains its
-deployment identity when it is executed outside the repository.
+`make install` stamps the installed copy using only the explicit source
+directory passed to the version injector. Ambient `GIT_DIR` and
+`GIT_WORK_TREE` do not change that identity. When the source directory has no
+Git identity, installation stamps an `unknown` hash, an `unknown` commit date,
+and the real UTC installation date:
+
+```text
+tmux-runner version 0.1.0 (unknown)
+commit date:  unknown
+install date: <installation-date>
+```
+
+An installed copy never changes to live discovery and never adopts a Git
+working tree that happens to contain its installation path.
 
 ## Bash Completion
 

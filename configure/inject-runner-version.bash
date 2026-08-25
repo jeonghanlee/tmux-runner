@@ -4,6 +4,9 @@
 
 set -euo pipefail
 
+# The explicit source repository is the only Git identity authority.
+unset GIT_DIR GIT_WORK_TREE
+
 readonly PROGRAM_NAME="${0##*/}"
 
 function fail {

@@ -2,6 +2,12 @@
 
 set -euo pipefail
 
+# Each test process establishes Git identity from its explicit fixtures.
+TEST_INITIAL_GIT_DIR=${GIT_DIR-}
+TEST_INITIAL_GIT_WORK_TREE=${GIT_WORK_TREE-}
+unset GIT_DIR GIT_WORK_TREE
+readonly TEST_INITIAL_GIT_DIR TEST_INITIAL_GIT_WORK_TREE
+
 TEST_SOURCE=${BASH_SOURCE[0]}
 if [[ "$TEST_SOURCE" == */* ]]; then
     TEST_SOURCE_DIR=${TEST_SOURCE%/*}
@@ -25,6 +31,10 @@ readonly VERSION_INJECTOR="$REPO_ROOT/configure/inject-runner-version.bash"
 readonly README="$REPO_ROOT/README.md"
 readonly RUNNER_CONFIG="$REPO_ROOT/config/tmux.conf"
 readonly RUNNER_SERVER_NAME="tmux-runner"
+readonly SESSION_PATH_UNMARKED_MARKER="tmux-runner-unmarked"
+readonly SESSION_PATH_GLOBAL_FALLBACK_MARKER="tmux-runner-global-unset"
+readonly SESSION_ENTRY_HOOK_PREFIX="@tmux-runner-entry-"
+readonly AFTER_SET_OPTION_SENTINEL="@tmux-runner-after-set-option-fired"
 readonly PTY_TIMEOUT_SECONDS=12
 readonly POLL_INTERVAL_SECONDS=0.05
 readonly SUPERVISOR_TIMEOUT_SECONDS=30
@@ -55,6 +65,9 @@ STATE_LOCK_HOLDER_RELEASE=""
 STATE_LOCK_HOLDER_READY=""
 ATTACH_GATE_RELEASE=""
 ATTACH_GATE_READY=""
+ENTRY_GATE_RELEASE=""
+ENTRY_GATE_READY=""
+ENTRY_GATE_DONE=""
 LAST_PENDING_FILE=""
 BATCH_PTY_PIDS=()
 BATCH_PTY_FDS=()
@@ -63,6 +76,18 @@ TESTS_PASSED=0
 TMUX_ROOTS=()
 EXTRA_PTY_PIDS=()
 EXTRA_PTY_FDS=()
+
+function require_test_process_git_boundary {
+    local expected_repository="${TMUX_RUNNER_TEST_EXPECTED_AMBIENT_REPOSITORY:-}"
+
+    if [[ -z "$expected_repository" ]]; then
+        return 0
+    fi
+    if [[ "$TEST_INITIAL_GIT_DIR" != "$expected_repository/.git" ]] || \
+        [[ "$TEST_INITIAL_GIT_WORK_TREE" != "$expected_repository" ]]; then
+        fail_test "test process did not receive the controlled ambient Git identity"
+    fi
+}
 
 function close_fd_number {
     local fd_number="$1"
@@ -325,12 +350,217 @@ function server_fingerprint {
         LC_ALL=C sort
 }
 
+function server_identity_fingerprint {
+    local root="$1"
+
+    run_tmux "$root" list-panes -a \
+        -F '#{session_name}|#{session_id}|#{window_id}|#{pane_id}|#{pane_current_path}' | \
+        LC_ALL=C sort
+}
+
 function session_identity {
     local root="$1"
     local session_name="$2"
 
     run_tmux "$root" list-panes -t "=$session_name" -F \
         '#{session_id}|#{window_id}|#{pane_id}'
+}
+
+function session_id {
+    local root="$1"
+    local session_name="$2"
+
+    run_tmux "$root" display-message -p -t "=$session_name:" \
+        '#{session_id}'
+}
+
+function raw_session_path_marker {
+    local root="$1"
+    local session_name="$2"
+
+    run_tmux "$root" show-options -v -t "=$session_name:" \
+        @tmux-runner-path
+}
+
+function entry_hook_name_from_trace {
+    local trace_file="$1"
+    local trace_line=""
+
+    while IFS= read -r trace_line || [[ -n "$trace_line" ]]; do
+        if [[ "$trace_line" =~ (@tmux-runner-entry-[A-Za-z0-9_-]+) ]]; then
+            printf '%s\n' "${BASH_REMATCH[1]}"
+            return 0
+        fi
+    done < "$trace_file"
+    return 1
+}
+
+function entry_transaction_id_from_trace {
+    local trace_file="$1"
+    local trace_line=""
+
+    while IFS= read -r trace_line || [[ -n "$trace_line" ]]; do
+        if [[ "$trace_line" =~ STATE_TRANSACTION_ID=([A-Za-z0-9_-]+) ]]; then
+            printf '%s\n' "${BASH_REMATCH[1]}"
+            return 0
+        fi
+    done < "$trace_file"
+    return 1
+}
+
+function session_entry_hook_definitions {
+    local root="$1"
+    local global_hooks=""
+    local session_hooks=""
+    local session_targets=""
+    local session_target=""
+    local hook_line=""
+
+    if ! global_hooks=$(run_tmux "$root" show-hooks -g); then
+        fail_test "cannot query global tmux hooks"
+    fi
+    while IFS= read -r hook_line || [[ -n "$hook_line" ]]; do
+        if [[ "$hook_line" == "$SESSION_ENTRY_HOOK_PREFIX"* ]]; then
+            printf 'global|%s\n' "$hook_line"
+        fi
+    done <<< "$global_hooks"
+
+    if ! session_targets=$(run_tmux "$root" list-sessions -F '#{session_id}'); then
+        fail_test "cannot query tmux sessions for entry hook cleanup"
+    fi
+    while IFS= read -r session_target || [[ -n "$session_target" ]]; do
+        if [[ -z "$session_target" ]]; then
+            continue
+        fi
+        if ! session_hooks=$(run_tmux "$root" show-hooks \
+                -t "${session_target}:"); then
+            fail_test "cannot query tmux session hooks: $session_target"
+        fi
+        while IFS= read -r hook_line || [[ -n "$hook_line" ]]; do
+            if [[ "$hook_line" == "$SESSION_ENTRY_HOOK_PREFIX"* ]]; then
+                printf '%s|%s\n' "$session_target" "$hook_line"
+            fi
+        done <<< "$session_hooks"
+    done <<< "$session_targets"
+}
+
+function assert_no_session_entry_hooks {
+    local root="$1"
+    local message="$2"
+    local definitions=""
+
+    definitions=$(session_entry_hook_definitions "$root")
+    assert_equal "" "$definitions" "$message"
+}
+
+function assert_session_entry_hook_trace {
+    local trace_file="$1"
+    local root="$2"
+    local message="$3"
+    local hook_name=""
+    local transaction_id=""
+
+    if ! hook_name=$(entry_hook_name_from_trace "$trace_file"); then
+        fail_test "$message"
+    fi
+    if ! transaction_id=$(entry_transaction_id_from_trace "$trace_file"); then
+        fail_test "$message"
+    fi
+    assert_equal "${SESSION_ENTRY_HOOK_PREFIX}${transaction_id}" \
+        "$hook_name" "$message"
+    assert_no_session_entry_hooks "$root" "$message"
+}
+
+function assert_entry_command_targets_id {
+    local trace_file="$1"
+    local target_id="$2"
+    local message="$3"
+    local transaction_id=""
+    local hook_name=""
+    local definition_fragment=""
+    local run_fragment=""
+    local self_cleanup_fragment=""
+    local outer_cleanup_fragment=""
+    local guard_fragment=""
+    local attach_fragment=""
+    local switch_fragment=""
+    local fallback_command_fragment=""
+    local definition_pattern=""
+    local fallback_pattern=""
+    local attach_pattern=""
+    local switch_pattern=""
+    local trace_line=""
+    local normalized_line=""
+
+    if ! transaction_id=$(entry_transaction_id_from_trace "$trace_file"); then
+        fail_test "$message"
+    fi
+    hook_name="${SESSION_ENTRY_HOOK_PREFIX}${transaction_id}"
+    definition_fragment="set-hook -t ${target_id}: $hook_name"
+    self_cleanup_fragment="set-hook -u -t ${target_id}: $hook_name ;"
+    run_fragment="set-hook -R -t ${target_id}: $hook_name ;"
+    outer_cleanup_fragment="set-hook -u -t ${target_id}: $hook_name"
+    guard_fragment="if-shell -F -t ${target_id}:"
+    fallback_command_fragment="set-option -gq @tmux-runner-path"
+    attach_fragment="attach-session -t $target_id ; run-shell"
+    switch_fragment="switch-client -t $target_id ; run-shell"
+    definition_pattern="*${definition_fragment}*${self_cleanup_fragment}*"
+    definition_pattern+="${fallback_command_fragment}*"
+    fallback_pattern="*${fallback_command_fragment}*"
+    fallback_pattern+="${SESSION_PATH_GLOBAL_FALLBACK_MARKER}*"
+    fallback_pattern+="${guard_fragment}*"
+    attach_pattern="*${guard_fragment}*${attach_fragment}*"
+    attach_pattern+="${run_fragment}*${outer_cleanup_fragment}*"
+    switch_pattern="*${guard_fragment}*${switch_fragment}*"
+    switch_pattern+="${run_fragment}*${outer_cleanup_fragment}*"
+    while IFS= read -r trace_line || [[ -n "$trace_line" ]]; do
+        normalized_line="${trace_line//\\/}"
+        normalized_line="${normalized_line//\'/}"
+        # The composed trace patterns intentionally retain wildcard separators.
+        # shellcheck disable=SC2053
+        if [[ "$normalized_line" != $definition_pattern ]]; then
+            continue
+        fi
+        # shellcheck disable=SC2053
+        if [[ "$normalized_line" != $fallback_pattern ]]; then
+            continue
+        fi
+        # shellcheck disable=SC2053
+        if [[ "$normalized_line" == $attach_pattern ]] || \
+            [[ "$normalized_line" == $switch_pattern ]]; then
+            return 0
+        fi
+    done < "$trace_file"
+    fail_test "$message"
+}
+
+function assert_session_entry_trace_with_prefix {
+    local trace_file="$1"
+    local root="$2"
+    local session_name="$3"
+    local trace_prefix="$4"
+    local message="$5"
+    local target_id=""
+
+    target_id=$(session_id "$root" "$session_name")
+    assert_contains "$trace_file" \
+        "$trace_prefix set-hook -t '$target_id:' $SESSION_ENTRY_HOOK_PREFIX" \
+        "$message"
+    assert_entry_command_targets_id "$trace_file" "$target_id" "$message"
+    assert_session_entry_hook_trace "$trace_file" "$root" "$message"
+}
+
+function assert_session_entry_trace {
+    local trace_file="$1"
+    local root="$2"
+    local session_name="$3"
+    local message="$4"
+
+    local target_id=""
+
+    target_id=$(session_id "$root" "$session_name")
+    assert_entry_command_targets_id "$trace_file" "$target_id" "$message"
+    assert_session_entry_hook_trace "$trace_file" "$root" "$message"
 }
 
 function pane_directory {
@@ -925,12 +1155,8 @@ function run_outside_syntax_failure {
     shift 5
     run_outside_failure "$label" "$root" "$home" "$xdg_home" \
         "$runner" "$@"
-    assert_not_contains "$LAST_TRANSCRIPT" \
-        "$TMUX_RUNNER_TRACE_PREFIX attach-session" \
-        "$label called attach-session"
-    assert_not_contains "$LAST_TRANSCRIPT" \
-        "$TMUX_RUNNER_TRACE_PREFIX switch-client" \
-        "$label called switch-client"
+    assert_not_contains "$LAST_TRANSCRIPT" "if-shell -F" \
+        "$label reached the final entry seam"
 }
 
 function run_outside_create_syntax_failure {
@@ -949,12 +1175,8 @@ function run_outside_create_syntax_failure {
     assert_not_contains "$LAST_TRANSCRIPT" \
         "$TMUX_RUNNER_TRACE_PREFIX new-session" \
         "$label called new-session"
-    assert_not_contains "$LAST_TRANSCRIPT" \
-        "$TMUX_RUNNER_TRACE_PREFIX attach-session" \
-        "$label called attach-session"
-    assert_not_contains "$LAST_TRANSCRIPT" \
-        "$TMUX_RUNNER_TRACE_PREFIX switch-client" \
-        "$label called switch-client"
+    assert_not_contains "$LAST_TRANSCRIPT" "if-shell -F" \
+        "$label reached the final entry seam"
 }
 
 function run_concurrent_create {
@@ -1080,11 +1302,11 @@ function run_concurrent_create {
 
     assert_equal "0" "$rc_one" "$label first runner failed"
     assert_equal "0" "$rc_two" "$label second runner failed"
-    assert_contains "$transcript_one" \
-        "$race_trace_prefix attach-session -t =$session_name" \
+    assert_session_entry_trace_with_prefix "$transcript_one" "$root" \
+        "$session_name" "$race_trace_prefix" \
         "$label first runner did not attach exactly"
-    assert_contains "$transcript_two" \
-        "$race_trace_prefix attach-session -t =$session_name" \
+    assert_session_entry_trace_with_prefix "$transcript_two" "$root" \
+        "$session_name" "$race_trace_prefix" \
         "$label second runner did not attach exactly"
     assert_contains "$transcript_one" \
         "$race_trace_prefix new-session -d -s $session_name" \
@@ -1246,11 +1468,11 @@ function run_concurrent_auto_create {
     fi
     assert_not_equal "$target_one" "$target_two" \
         "$label reused one session for different paths"
-    assert_contains "$transcript_one" \
-        "$race_trace_prefix attach-session -t =$target_one" \
+    assert_session_entry_trace_with_prefix "$transcript_one" "$root" \
+        "$target_one" "$race_trace_prefix" \
         "$label first client entered the wrong path"
-    assert_contains "$transcript_two" \
-        "$race_trace_prefix attach-session -t =$target_two" \
+    assert_session_entry_trace_with_prefix "$transcript_two" "$root" \
+        "$target_two" "$race_trace_prefix" \
         "$label second client entered the wrong path"
 
     assert_contains "$transcript_one" \
@@ -1444,12 +1666,8 @@ function run_inside_syntax_failure {
     shift 6
     run_inside_failure "$label" "$root" "$home" "$xdg_home" \
         "$source_session" "$runner" "$@"
-    assert_not_contains "$LAST_INSIDE_TRACE" \
-        "$TMUX_RUNNER_TRACE_PREFIX attach-session" \
-        "$label called attach-session"
-    assert_not_contains "$LAST_INSIDE_TRACE" \
-        "$TMUX_RUNNER_TRACE_PREFIX switch-client" \
-        "$label called switch-client"
+    assert_not_contains "$LAST_INSIDE_TRACE" "if-shell -F" \
+        "$label reached the final entry seam"
 }
 
 function assert_session_set {
@@ -1536,6 +1754,8 @@ function run_repo_selection_success {
     detach_current_client
     finish_current_pty
     assert_last_pty_succeeded "$label failed"
+    assert_session_entry_trace "$LAST_TRANSCRIPT" "$root" \
+        "$expected_session" "$label did not target the selected session ID"
 }
 
 function run_concurrent_repo_selection {
@@ -1635,6 +1855,12 @@ function runner_state_directory_for {
     printf '%s/tmux-runner\n' "$state_home"
 }
 
+function runner_socket_path_for_root {
+    local root="$1"
+
+    printf '%s/tmux-%s/%s\n' "$root" "$UID" "$RUNNER_SERVER_NAME"
+}
+
 function encode_state_field {
     local value="$1"
 
@@ -1676,8 +1902,42 @@ function state_record_values {
     if [[ ! -f "$state_file" ]]; then
         return 0
     fi
-    awk -F '\t' -v record_type="$record_type" \
-        '$1 == record_type && NF == 3 { print $3 }' "$state_file"
+    awk -F '\t' -v record_type="$record_type" '
+        $1 == record_type && record_type == "session" && NF == 4 {
+            print $4
+        }
+        $1 == record_type && record_type == "recent" && NF == 4 {
+            print $4
+        }
+    ' "$state_file"
+}
+
+function state_session_values_for_server {
+    local state_file="$1"
+    local server_identity="$2"
+    local encoded_server=""
+
+    if [[ ! -f "$state_file" ]]; then
+        return 0
+    fi
+    encoded_server=$(encode_state_field "$server_identity")
+    awk -F '\t' -v encoded_server="$encoded_server" '
+        $1 == "session" && NF == 4 && $3 == encoded_server { print $4 }
+    ' "$state_file"
+}
+
+function state_recent_kind_for_path {
+    local state_file="$1"
+    local canonical_path="$2"
+    local encoded_path=""
+
+    if [[ ! -f "$state_file" ]]; then
+        return 0
+    fi
+    encoded_path=$(encode_state_field "$canonical_path")
+    awk -F '\t' -v encoded_path="$encoded_path" '
+        $1 == "recent" && NF == 4 && $4 == encoded_path { print $3 }
+    ' "$state_file"
 }
 
 function validate_main_state_record {
@@ -1686,7 +1946,7 @@ function validate_main_state_record {
     [[ -f "$state_file" ]] || return 0
     [[ "$(stat -c '%a' "$state_file")" == "600" ]] || return 1
     awk -F '\t' '
-        $1 == "version" && NF == 2 && $2 == "1" {
+        $1 == "version" && NF == 2 && $2 == "2" {
             versions++
             next
         }
@@ -1694,11 +1954,12 @@ function validate_main_state_record {
             sequences++
             next
         }
-        ($1 == "session" || $1 == "recent") && NF == 3 &&
-            $2 ~ /^[0-9]+$/ && length($3) > 0 {
+        $1 == "session" && NF == 4 && $2 ~ /^[0-9]+$/ &&
+            length($3) > 0 && length($4) > 0 {
             next
         }
-        $1 == "applied" && NF >= 2 {
+        $1 == "recent" && NF == 4 && $2 ~ /^[0-9]+$/ &&
+            ($3 == "git" || $3 == "plain") && length($4) > 0 {
             next
         }
         {
@@ -1741,9 +2002,13 @@ function wait_for_state_value {
 
     while (( SECONDS <= deadline )); do
         if [[ -f "$state_file" ]] && awk -F '\t' \
-            -v record_type="$record_type" -v value="$encoded_value" \
-            '$1 == record_type && NF == 3 && $3 == value { found = 1 }
-             END { exit !found }' "$state_file"; then
+            -v record_type="$record_type" -v value="$encoded_value" '
+                $1 == record_type && record_type == "session" &&
+                    NF == 4 && $4 == value { found = 1 }
+                $1 == record_type && record_type == "recent" &&
+                    NF == 4 && $4 == value { found = 1 }
+                END { exit !found }
+            ' "$state_file"; then
             return 0
         fi
         sleep "$POLL_INTERVAL_SECONDS"
@@ -1760,9 +2025,15 @@ function wait_for_state_row_count {
 
     while (( SECONDS <= deadline )); do
         if [[ -f "$state_file" ]]; then
-            count=$(awk -F '\t' -v record_type="$record_type" \
-                '$1 == record_type && NF == 3 { count++ }
-                 END { print count + 0 }' "$state_file")
+            count=$(awk -F '\t' -v record_type="$record_type" '
+                $1 == record_type && record_type == "session" && NF == 4 {
+                    count++
+                }
+                $1 == record_type && record_type == "recent" && NF == 4 {
+                    count++
+                }
+                END { print count + 0 }
+            ' "$state_file")
             if (( count == expected_count )); then
                 return 0
             fi
@@ -1845,7 +2116,7 @@ function wait_for_pending_ack {
     while (( SECONDS <= deadline )); do
         if [[ -f "$ack_file" ]] && [[ ! -L "$ack_file" ]] && \
             [[ "$(stat -c '%a' "$ack_file")" == "600" ]] && \
-            grep -Fx -- $'version\t1' "$ack_file" >/dev/null; then
+            grep -Fx -- $'version\t2' "$ack_file" >/dev/null; then
             return 0
         fi
         sleep "$POLL_INTERVAL_SECONDS"
@@ -1862,7 +2133,7 @@ function assert_versioned_transaction_record {
     fi
     assert_equal "600" "$(stat -c '%a' "$record_file")" \
         "$label mode is wrong"
-    if ! grep -Fx -- $'version\t1' "$record_file" >/dev/null; then
+    if ! grep -Fx -- $'version\t2' "$record_file" >/dev/null; then
         fail_test "$label is not a complete versioned state record"
     fi
 }
@@ -1978,6 +2249,8 @@ function run_recent_selection_success {
     detach_current_client
     finish_current_pty
     assert_last_pty_succeeded "$label failed"
+    assert_session_entry_trace "$LAST_TRANSCRIPT" "$root" \
+        "$expected_session" "$label did not target the recent session ID"
 }
 
 function run_list_selection_success {
@@ -2005,6 +2278,8 @@ function run_list_selection_success {
     detach_current_client
     finish_current_pty
     assert_last_pty_succeeded "$label failed"
+    assert_session_entry_trace "$LAST_TRANSCRIPT" "$root" \
+        "$expected_session" "$label did not target the listed session ID"
 }
 
 function monitor_state_records_until_stop {
@@ -2152,10 +2427,12 @@ function start_gated_runner_outside {
     local xdg_home="$4"
     local runner="$5"
     local target_session="$6"
+    local target_id=""
     local gate_bin="$WORKSPACE/pty/$label-gate-bin"
     local gate_tmux="$gate_bin/tmux"
 
     shift 6
+    target_id=$(session_id "$root" "$target_session")
     ATTACH_GATE_READY="$WORKSPACE/pty/$label-attach.ready"
     ATTACH_GATE_RELEASE="$WORKSPACE/pty/$label-attach.release"
     rm -f -- "$ATTACH_GATE_READY" "$ATTACH_GATE_RELEASE"
@@ -2166,7 +2443,7 @@ function start_gated_runner_outside {
         printf '%s\n' '#!/usr/bin/env bash'
         printf '%s\n' 'set -euo pipefail'
         printf '%s\n' 'joined=" $* "'
-        printf '%s\n' 'if [[ "$joined" == *" attach-session "* ]] && [[ "$joined" == *" -t =${TMUX_RUNNER_TEST_GATE_TARGET} "* ]]; then'
+        printf '%s\n' 'if [[ "$joined" == *"if-shell "* ]] && [[ "$joined" == *"attach-session -t "* ]] && [[ "$joined" == *" -t '\''${TMUX_RUNNER_TEST_GATE_TARGET}:'\'' "* ]]; then'
         printf '%s\n' '    printf "ready\n" > "$TMUX_RUNNER_TEST_GATE_READY"'
         printf '%s\n' '    deadline=$((SECONDS + 10))'
         printf '%s\n' '    while [[ ! -e "$TMUX_RUNNER_TEST_GATE_RELEASE" ]] && (( SECONDS <= deadline )); do'
@@ -2183,7 +2460,7 @@ function start_gated_runner_outside {
     start_pty_command "$label" "$root" "$home" "$xdg_home" \
         env PATH="$gate_bin:$PATH" \
         TMUX_RUNNER_TEST_REAL_TMUX="$TMUX_PATH" \
-        TMUX_RUNNER_TEST_GATE_TARGET="$target_session" \
+        TMUX_RUNNER_TEST_GATE_TARGET="$target_id" \
         TMUX_RUNNER_TEST_GATE_READY="$ATTACH_GATE_READY" \
         TMUX_RUNNER_TEST_GATE_RELEASE="$ATTACH_GATE_RELEASE" \
         bash -x "$runner" "$@"
@@ -2197,6 +2474,138 @@ function release_attach_gate {
         fail_test "no attach gate is active"
     fi
     : > "$ATTACH_GATE_RELEASE"
+}
+
+function start_entry_gated_runner_outside {
+    local label="$1"
+    local root="$2"
+    local home="$3"
+    local xdg_home="$4"
+    local runner="$5"
+    local gate_command="$6"
+    local gate_bin="$WORKSPACE/pty/$label-entry-gate-bin"
+    local gate_tmux="$gate_bin/tmux"
+
+    shift 6
+    ENTRY_GATE_READY="$WORKSPACE/pty/$label-entry.ready"
+    ENTRY_GATE_RELEASE="$WORKSPACE/pty/$label-entry.release"
+    ENTRY_GATE_DONE="$WORKSPACE/pty/$label-entry.done"
+    rm -f -- "$ENTRY_GATE_READY" "$ENTRY_GATE_RELEASE" "$ENTRY_GATE_DONE"
+    mkdir -p -- "$gate_bin"
+    # The generated wrapper expands these values when it runs.
+    # shellcheck disable=SC2016
+    {
+        printf '%s\n' '#!/usr/bin/env bash'
+        printf '%s\n' 'set -euo pipefail'
+        printf '%s\n' 'joined=" $* "'
+        printf '%s\n' 'gated=0'
+        printf '%s\n' 'if [[ "$joined" == *" ${TMUX_RUNNER_TEST_GATE_COMMAND} "* ]]; then'
+        printf '%s\n' '    gated=1'
+        printf '%s\n' '    printf "ready\n" > "$TMUX_RUNNER_TEST_GATE_READY"'
+        printf '%s\n' '    deadline=$((SECONDS + 10))'
+        printf '%s\n' '    while [[ ! -e "$TMUX_RUNNER_TEST_GATE_RELEASE" ]] && (( SECONDS <= deadline )); do'
+        printf '%s\n' '        sleep 0.01'
+        printf '%s\n' '    done'
+        printf '%s\n' '    if [[ ! -e "$TMUX_RUNNER_TEST_GATE_RELEASE" ]]; then'
+        printf '%s\n' '        printf "entry gate timed out\n" >&2'
+        printf '%s\n' '        exit 98'
+        printf '%s\n' '    fi'
+        printf '%s\n' 'fi'
+        printf '%s\n' 'tmux_rc=0'
+        printf '%s\n' \
+            '"$TMUX_RUNNER_TEST_REAL_TMUX" "$@" || tmux_rc=$?'
+        printf '%s\n' 'if (( gated )); then'
+        printf '%s\n' \
+            '    printf "done\n" > "$TMUX_RUNNER_TEST_GATE_DONE"'
+        printf '%s\n' 'fi'
+        printf '%s\n' 'exit "$tmux_rc"'
+    } > "$gate_tmux"
+    chmod 0755 "$gate_tmux"
+    start_pty_command "$label" "$root" "$home" "$xdg_home" \
+        env PATH="$gate_bin:$PATH" \
+        TMUX_RUNNER_TEST_REAL_TMUX="$TMUX_PATH" \
+        TMUX_RUNNER_TEST_GATE_COMMAND="$gate_command" \
+        TMUX_RUNNER_TEST_GATE_READY="$ENTRY_GATE_READY" \
+        TMUX_RUNNER_TEST_GATE_RELEASE="$ENTRY_GATE_RELEASE" \
+        TMUX_RUNNER_TEST_GATE_DONE="$ENTRY_GATE_DONE" \
+        bash -x "$runner" "$@"
+}
+
+function invoke_runner_inside_entry_gated {
+    local label="$1"
+    local root="$2"
+    local home="$3"
+    local xdg_home="$4"
+    local source_session="$5"
+    local runner="$6"
+    local gate_bin="$WORKSPACE/pty/$label-inside-entry-gate-bin"
+    local gate_tmux="$gate_bin/tmux"
+    local runner_command=""
+    local shell_command=""
+
+    shift 6
+    ENTRY_GATE_READY="$WORKSPACE/pty/$label-entry.ready"
+    ENTRY_GATE_RELEASE="$WORKSPACE/pty/$label-entry.release"
+    ENTRY_GATE_DONE="$WORKSPACE/pty/$label-entry.done"
+    LAST_INSIDE_TRACE="$WORKSPACE/pty/$label.inside-trace"
+    LAST_INSIDE_STATUS="$WORKSPACE/pty/$label.inside-status"
+    rm -f -- "$ENTRY_GATE_READY" "$ENTRY_GATE_RELEASE" "$ENTRY_GATE_DONE"
+    mkdir -p -- "$gate_bin"
+    # The generated wrapper expands these values when it runs.
+    # shellcheck disable=SC2016
+    {
+        printf '%s\n' '#!/usr/bin/env bash'
+        printf '%s\n' 'set -euo pipefail'
+        printf '%s\n' 'joined=" $* "'
+        printf '%s\n' 'gated=0'
+        printf '%s\n' \
+            'if [[ "$joined" == *"if-shell "* ]] && [[ "$joined" == *"switch-client -t "* ]]; then'
+        printf '%s\n' '    gated=1'
+        printf '%s\n' \
+            '    printf "ready\n" > "$TMUX_RUNNER_TEST_GATE_READY"'
+        printf '%s\n' '    deadline=$((SECONDS + 10))'
+        printf '%s\n' \
+            '    while [[ ! -e "$TMUX_RUNNER_TEST_GATE_RELEASE" ]] && (( SECONDS <= deadline )); do'
+        printf '%s\n' '        sleep 0.01'
+        printf '%s\n' '    done'
+        printf '%s\n' \
+            '    if [[ ! -e "$TMUX_RUNNER_TEST_GATE_RELEASE" ]]; then'
+        printf '%s\n' '        printf "entry gate timed out\n" >&2'
+        printf '%s\n' '        exit 98'
+        printf '%s\n' '    fi'
+        printf '%s\n' 'fi'
+        printf '%s\n' 'tmux_rc=0'
+        printf '%s\n' \
+            '"$TMUX_RUNNER_TEST_REAL_TMUX" "$@" || tmux_rc=$?'
+        printf '%s\n' 'if (( gated )); then'
+        printf '%s\n' \
+            '    printf "done\n" > "$TMUX_RUNNER_TEST_GATE_DONE"'
+        printf '%s\n' 'fi'
+        printf '%s\n' 'exit "$tmux_rc"'
+    } > "$gate_tmux"
+    chmod 0755 "$gate_tmux"
+
+    printf -v runner_command '%q ' env PATH="$gate_bin:$PATH" \
+        TMUX_RUNNER_TEST_REAL_TMUX="$TMUX_PATH" \
+        TMUX_RUNNER_TEST_GATE_READY="$ENTRY_GATE_READY" \
+        TMUX_RUNNER_TEST_GATE_RELEASE="$ENTRY_GATE_RELEASE" \
+        TMUX_RUNNER_TEST_GATE_DONE="$ENTRY_GATE_DONE" \
+        HOME="$home" XDG_CONFIG_HOME="$xdg_home" TMUX_TMPDIR="$root" \
+        bash -x "$runner" "$@"
+    runner_command="${runner_command% }"
+    printf -v shell_command \
+        "set -o pipefail; %s 2>&1 | tee %q; runner_rc=\${PIPESTATUS[0]}; printf \"%%s\\n\" \"\$runner_rc\" > %q" \
+        "$runner_command" "$LAST_INSIDE_TRACE" "$LAST_INSIDE_STATUS"
+    run_tmux "$root" send-keys -t "$source_session:0.0" \
+        -l -- "$shell_command"
+    run_tmux "$root" send-keys -t "$source_session:0.0" C-m
+}
+
+function release_entry_gate {
+    if [[ -z "$ENTRY_GATE_RELEASE" ]]; then
+        fail_test "no entry gate is active"
+    fi
+    : > "$ENTRY_GATE_RELEASE"
 }
 
 function terminate_current_pty_as_crash {
@@ -2381,19 +2790,24 @@ function create_ack_ticket_aba_wrappers {
         printf '%s\n' '#!/usr/bin/env bash'
         printf '%s\n' 'set -euo pipefail'
         printf '%s\n' 'is_attach=0'
-        printf '%s\n' 'previous=""'
+        printf '%s\n' 'joined=" $* "'
         printf '%s\n' 'target=""'
         printf '%s\n' 'for argument in "$@"; do'
-        printf '%s\n' '    if [[ "$previous" == "-t" ]]; then'
-        printf '%s\n' '        target="$argument"'
+        printf '%s\n' '    if [[ "$argument" == *" if-shell -F -t "* ]]; then'
+        printf '%s\n' '        target="${argument#* if-shell -F -t }"'
+        printf '%s\n' '        target="${target%% *}"'
+        printf '%s\n' '        target="${target:1:${#target}-2}"'
+        printf '%s\n' '        target="${target%:}"'
         printf '%s\n' '    fi'
-        printf '%s\n' '    if [[ "$argument" == "attach-session" ]]; then'
-        printf '%s\n' '        is_attach=1'
-        printf '%s\n' '    fi'
-        printf '%s\n' '    previous="$argument"'
         printf '%s\n' 'done'
+        printf '%s\n' 'if [[ "$joined" == *"if-shell "* ]] && [[ "$joined" == *"attach-session -t "* ]]; then'
+        printf '%s\n' '    is_attach=1'
+        printf '%s\n' 'fi'
         printf '%s\n' 'if (( is_attach )); then'
-        printf '%s\n' '    target="${target#=}"'
+        printf '%s\n' '    if [[ ! "$target" =~ ^\$[0-9]+$ ]]; then'
+        printf '%s\n' '        printf "cannot resolve entry target\n" >&2'
+        printf '%s\n' '        exit 96'
+        printf '%s\n' '    fi'
         printf '%s\n' '    printf "ready\n" > "$TMUX_RUNNER_TEST_ABA_GATE/attach.$target"'
         printf '%s\n' '    deadline=$((SECONDS + TMUX_RUNNER_TEST_GATE_TIMEOUT))'
         printf '%s\n' '    while [[ ! -e "$TMUX_RUNNER_TEST_ABA_GATE/attach.release" ]] && (( SECONDS <= deadline )); do'
@@ -2633,7 +3047,7 @@ function exercise_m6_t4_ack_ticket_aba {
     for session_path in "${session_paths[@]}"; do
         row_sequence=$(awk -F '\t' \
             -v path="$(encode_state_field "$session_path")" \
-            '$1 == "recent" && NF == 3 && $3 == path { print $2 }' \
+            '$1 == "recent" && NF == 4 && $4 == path { print $2 }' \
             "$state_file")
         if [[ ! "$row_sequence" =~ ^[0-9]+$ ]]; then
             fail_test "ticket ABA recent row has no single valid sequence"
@@ -2730,12 +3144,16 @@ function test_t2_create {
 
     run_outside_success t2-alias-create "$root" "$home" "$xdg_home" \
         "$RUNNER" alias_session_blue c -s alias.session:blue -c "$alias_dir"
+    assert_session_entry_trace "$LAST_TRANSCRIPT" "$root" \
+        alias_session_blue "c did not target the resolved session ID"
     assert_contains "$LAST_TRANSCRIPT" \
         "$TMUX_RUNNER_TRACE_PREFIX new-session -d -s alias_session_blue" \
         "alias create did not normalize the session name"
     identity_before=$(session_identity "$root" alias_session_blue)
     run_outside_success t2-alias-reuse "$root" "$home" "$xdg_home" \
         "$RUNNER" alias_session_blue create -s alias.session:blue -c "$alias_dir"
+    assert_session_entry_trace "$LAST_TRANSCRIPT" "$root" \
+        alias_session_blue "create did not target the resolved session ID"
     assert_equal "$identity_before" "$(session_identity "$root" alias_session_blue)" \
         "existing session reuse changed its identifiers"
     assert_not_contains "$LAST_TRANSCRIPT" \
@@ -2767,8 +3185,7 @@ function test_t2_create {
     run_tmux "$root" new-session -d -s source-create
     run_inside_success t2-inside-new "$root" "$home" "$xdg_home" \
         source-create inside_new "$RUNNER" create -s inside.new -c "$inside_dir"
-    assert_contains "$LAST_INSIDE_TRACE" \
-        "$TMUX_RUNNER_TRACE_PREFIX switch-client -t =inside_new" \
+    assert_session_entry_trace "$LAST_INSIDE_TRACE" "$root" inside_new \
         "inside create did not use an exact switch target"
 
     identity_before=$(session_identity "$root" alias_session_blue)
@@ -2815,8 +3232,6 @@ function test_t3_attach {
     local home=""
     local xdg_home=""
     local fingerprint_before=""
-    local standard_trace="$TMUX_RUNNER_TRACE_PREFIX attach-session -t =target"
-    local switch_trace="$TMUX_RUNNER_TRACE_PREFIX switch-client -t =target"
 
     create_tmux_root t3
     root="$NEW_TMUX_ROOT"
@@ -2830,12 +3245,14 @@ function test_t3_attach {
 
     run_outside_success t3-attach-t "$root" "$home" "$xdg_home" \
         "$RUNNER" target attach -t target
-    assert_contains "$LAST_TRANSCRIPT" "$standard_trace" \
+    assert_session_entry_trace "$LAST_TRANSCRIPT" "$root" target \
         "attach -t did not use the exact target"
     run_outside_success t3-attach-positional "$root" "$home" "$xdg_home" \
         "$RUNNER" target attach target
     run_outside_success t3-a-t "$root" "$home" "$xdg_home" \
         "$RUNNER" target a -t target
+    assert_session_entry_trace "$LAST_TRANSCRIPT" "$root" target \
+        "a did not target the resolved session ID"
     run_outside_success t3-a-positional "$root" "$home" "$xdg_home" \
         "$RUNNER" target a target
     run_outside_success t3-attach-terminator "$root" "$home" "$xdg_home" \
@@ -2845,7 +3262,7 @@ function test_t3_attach {
 
     run_inside_success t3-inside-attach-t "$root" "$home" "$xdg_home" \
         source target "$RUNNER" attach -t target
-    assert_contains "$LAST_INSIDE_TRACE" "$switch_trace" \
+    assert_session_entry_trace "$LAST_INSIDE_TRACE" "$root" target \
         "inside attach -t did not use the exact target"
     run_inside_success t3-inside-attach-positional "$root" "$home" \
         "$xdg_home" source target "$RUNNER" attach target
@@ -2860,13 +3277,13 @@ function test_t3_attach {
 
     run_outside_success t3-dotted-outside "$root" "$home" "$xdg_home" \
         "$RUNNER" dotted_target_blue attach dotted.target:blue
-    assert_contains "$LAST_TRANSCRIPT" \
-        "$TMUX_RUNNER_TRACE_PREFIX attach-session -t =dotted_target_blue" \
+    assert_session_entry_trace "$LAST_TRANSCRIPT" "$root" \
+        dotted_target_blue \
         "outside attach did not normalize separators"
     run_inside_success t3-dotted-inside "$root" "$home" "$xdg_home" \
         source dotted_target_blue "$RUNNER" a -t dotted.target:blue
-    assert_contains "$LAST_INSIDE_TRACE" \
-        "$TMUX_RUNNER_TRACE_PREFIX switch-client -t =dotted_target_blue" \
+    assert_session_entry_trace "$LAST_INSIDE_TRACE" "$root" \
+        dotted_target_blue \
         "inside attach did not normalize separators"
 
     fingerprint_before=$(server_fingerprint "$root")
@@ -2926,13 +3343,13 @@ function test_t3_attach {
     run_outside_failure t3-prefix-missing-outside "$root" "$home" "$xdg_home" \
         "$RUNNER" attach prefix-only
     assert_contains "$LAST_TRANSCRIPT" \
-        "$TMUX_RUNNER_TRACE_PREFIX attach-session -t =prefix-only" \
-        "missing exact target was not passed to attach-session"
+        "display-message -p -t =prefix-only:" \
+        "missing exact target was not resolved exactly"
     run_inside_failure t3-prefix-missing-inside "$root" "$home" "$xdg_home" \
         source "$RUNNER" a -t prefix-only
     assert_contains "$LAST_INSIDE_TRACE" \
-        "$TMUX_RUNNER_TRACE_PREFIX switch-client -t =prefix-only" \
-        "missing exact target was not passed to switch-client"
+        "display-message -p -t =prefix-only:" \
+        "missing exact inside target was not resolved exactly"
 
     assert_session_set "$root" "T3 session set changed" \
         source target dotted_target_blue prefix-only-long
@@ -2980,8 +3397,7 @@ function test_t4_list {
     detach_current_client
     finish_current_pty
     assert_last_pty_succeeded "alpha ls selection failed"
-    assert_contains "$LAST_TRANSCRIPT" \
-        "$TMUX_RUNNER_TRACE_PREFIX attach-session -t =alpha" \
+    assert_session_entry_trace "$LAST_TRANSCRIPT" "$selected_root" alpha \
         "alpha selection did not use the exact target"
 
     expected_rows=$(run_tmux "$selected_root" list-sessions)
@@ -3027,8 +3443,7 @@ function test_t4_list {
     detach_current_client
     finish_current_pty
     assert_last_pty_succeeded "inside ls client failed"
-    assert_contains "$LAST_INSIDE_TRACE" \
-        "$TMUX_RUNNER_TRACE_PREFIX switch-client -t =gamma" \
+    assert_session_entry_trace "$LAST_INSIDE_TRACE" "$selected_root" gamma \
         "inside ls did not use the exact switch target"
 
     fingerprint_before=$(server_fingerprint "$selected_root")
@@ -3280,8 +3695,9 @@ function test_t6_install {
     run_tmux "$root" -f /dev/null new-session -d -s install-target
     run_outside_success t6-installed-attach "$root" "$home" "$xdg_home" \
         "$installed_runner" install-target attach -t install-target
-    assert_contains "$LAST_TRANSCRIPT" \
-        "$TMUX_PATH -L $RUNNER_SERVER_NAME -f '$installed_config' attach-session -t =install-target" \
+    assert_session_entry_trace_with_prefix "$LAST_TRANSCRIPT" "$root" \
+        install-target \
+        "$TMUX_PATH -L $RUNNER_SERVER_NAME -f '$installed_config'" \
         "installed runner did not use the exact target"
     pass_test T6 \
         "isolated local installation, config preservation, and execution"
@@ -3316,8 +3732,24 @@ function test_t7_documentation {
         "README omits outside UDS selection"
     assert_contains "$README" "tmux -L tmux-runner" \
         "README omits the dedicated server"
-    assert_contains "$README" "Inside the dedicated server" \
+    assert_contains "$README" "switch-client\` inside" \
         "README omits inside client data flow"
+    assert_contains "$README" "tmux \`#{session_id}\`" \
+        "README omits transient session ID resolution"
+    assert_contains "$README" "non-shell \`if-shell -F\`" \
+        "README omits the server-side identity guard"
+    assert_contains "$README" "raw marker value" \
+        "README omits raw marker comparison"
+    assert_contains "$README" "\`tmux-runner-unmarked\`" \
+        "README omits reserved unmarked-session normalization"
+    assert_contains "$README" "\`tmux-runner-global-unset\`" \
+        "README omits the invalid global marker fallback"
+    assert_contains "$README" "acknowledgment makes the runner fail" \
+        "README omits failed acknowledgment behavior"
+    assert_contains "$README" "ID and raw marker are not" \
+        "README omits the unchanged state formats"
+    assert_contains "$README" "acknowledgment-ticket formats" \
+        "README omits the transaction state formats"
     assert_contains "$README" "detach and rerun" \
         "README omits the other-server boundary"
     assert_contains "$README" "tmux-runner/tmux.conf" \
@@ -3351,6 +3783,11 @@ function test_t7_documentation {
         "README omits the sed requirement check"
     assert_contains "$README" "command -v flock" \
         "README omits the flock requirement check"
+    assert_contains "$README" "stamps an \`unknown\` hash" \
+        "README omits no-Git installation identity"
+    assert_contains "$README" \
+        "installed copy never changes to live discovery" \
+        "README omits immutable installed metadata"
     assert_contains "$README" "bash --version" \
         "README omits the Bash version check"
     assert_contains "$README" "make --version" \
@@ -3485,12 +3922,20 @@ function test_t9_version {
     local duplicate_anchor="$WORKSPACE/t9/duplicate-anchor/tmux-runner"
     local stdout_file="$WORKSPACE/t9/invalid.stdout"
     local stderr_file="$WORKSPACE/t9/invalid.stderr"
+    local ambient_repository="$WORKSPACE/t9/ambient-repository"
+    local ambient_hash=""
+    local ambient_output=""
     local rc=0
 
     mkdir -p -- "$WORKSPACE/t9/unrelated" "$fixture_seed/bin" \
         "${clean_installed%/*}" "${dirty_installed%/*}" \
         "${locked_installed%/*}" "${missing_anchor%/*}" \
         "${duplicate_anchor%/*}"
+    init_git_repository "$ambient_repository"
+    printf 'ambient\n' > "$ambient_repository/ambient.txt"
+    git -C "$ambient_repository" add ambient.txt
+    git -C "$ambient_repository" commit -q -m "Change ambient identity"
+    ambient_hash=$(git -C "$ambient_repository" rev-parse --short HEAD)
     expected_hash=$(git -C "$REPO_ROOT" rev-parse --short HEAD)
     if ! git -C "$REPO_ROOT" diff --quiet HEAD --; then
         expected_hash="${expected_hash}-dirty"
@@ -3502,8 +3947,12 @@ function test_t9_version {
 
     short_output=$(cd -- "$WORKSPACE/t9/unrelated" && "$RUNNER" -V)
     long_output=$(cd -- "$WORKSPACE/t9/unrelated" && "$RUNNER" --version)
+    ambient_output=$(env GIT_DIR="$ambient_repository/.git" \
+        GIT_WORK_TREE="$ambient_repository" "$RUNNER" --version)
     assert_equal "$short_output" "$long_output" \
         "short and long version forms differ"
+    assert_equal "$long_output" "$ambient_output" \
+        "ambient Git controls changed version repository identity"
     if [[ "$TEST_VARIANT" == "source" ]]; then
         assert_equal "tmux-runner version 0.1.0 (${expected_hash} (live))" \
             "${long_output%%$'\n'*}" \
@@ -3537,6 +3986,8 @@ function test_t9_version {
         -c user.email=tmux-runner-test@example.invalid \
         commit -qm "Create version fixture"
     fixture_hash=$(git -C "$fixture_seed" rev-parse --short HEAD)
+    assert_not_equal "$ambient_hash" "$fixture_hash" \
+        "ambient and explicit injector repositories have the same identity"
     cp -a "$fixture_seed" "$clean_repository"
     cp -a "$fixture_seed" "$modified_repository"
     cp -a "$fixture_seed" "$locked_repository"
@@ -3549,7 +4000,9 @@ function test_t9_version {
         "relocated clean fixture did not report a bare live Git hash"
 
     cp "$clean_runner" "$clean_installed"
-    bash "$VERSION_INJECTOR" "$clean_installed" "$clean_repository"
+    env GIT_DIR="$ambient_repository/.git" \
+        GIT_WORK_TREE="$ambient_repository" \
+        bash "$VERSION_INJECTOR" "$clean_installed" "$clean_repository"
     fixture_output=$(env PATH=/nonexistent /bin/bash \
         "$clean_installed" --version)
     assert_equal "tmux-runner version 0.1.0 (${fixture_hash})" \
@@ -3849,9 +4302,11 @@ function test_m3_t4_client_boundary {
 
 function test_m4_t1_repository_identity {
     local root=""
+    local ambient_root=""
     local home="$WORKSPACE/m4-t1/home"
     local xdg_home="$WORKSPACE/m4-t1/xdg"
     local repository="$WORKSPACE/m4-t1/project.repo"
+    local ambient_repository="$WORKSPACE/m4-t1/ambient.repo"
     local subdir_one="$repository/src/one"
     local subdir_two="$repository/src/two"
     local short_hostname=""
@@ -3862,6 +4317,7 @@ function test_m4_t1_repository_identity {
     root="$NEW_TMUX_ROOT"
     mkdir -p -- "$home" "$xdg_home"
     init_git_repository "$repository"
+    init_git_repository "$ambient_repository"
     mkdir -p -- "$subdir_one" "$subdir_two"
     short_hostname=$(hostname -s)
     short_hostname="${short_hostname//./_}"
@@ -3884,6 +4340,22 @@ function test_m4_t1_repository_identity {
     assert_not_contains "$LAST_TRANSCRIPT" \
         "$TMUX_RUNNER_TRACE_PREFIX new-session" \
         "repository path reuse created another session"
+
+    create_tmux_root m4-t1-ambient
+    ambient_root="$NEW_TMUX_ROOT"
+    start_pty_command m4-t1-ambient "$ambient_root" "$home" "$xdg_home" \
+        env GIT_DIR="$ambient_repository/.git" \
+        GIT_WORK_TREE="$ambient_repository" bash -x "$RUNNER" \
+        create -c "$subdir_one"
+    if ! wait_for_client_session "$ambient_root" "$session_name"; then
+        fail_test "ambient Git create did not reach $session_name"
+    fi
+    detach_current_client
+    finish_current_pty
+    assert_last_pty_succeeded "ambient Git create failed"
+    assert_equal "$repository" \
+        "$(session_path "$ambient_root" "$session_name")" \
+        "ambient Git controls changed create folder identity"
     pass_test M4-T1 "Git top-level path identity and subdirectory reuse"
 }
 
@@ -4210,6 +4682,8 @@ function test_m5_t1_repository_configuration {
 
 function test_m5_t2_repository_discovery {
     local root=""
+    local first_order_root=""
+    local second_order_root=""
     local home="$WORKSPACE/m5-t2/home"
     local xdg_home="$WORKSPACE/m5-t2/xdg"
     local repos_file="$xdg_home/tmux-runner/repos"
@@ -4224,6 +4698,7 @@ function test_m5_t2_repository_discovery {
     local shared_two="$scan_root/team-b/shared"
     local norm_one="$scan_root/hash/alpha.dot/norm"
     local norm_two="$scan_root/hash/alpha:dot/norm"
+    local newline_repo="$scan_root/newline"$'\n'"repository"
     local unreadable_subtree="$scan_root/unreadable-subtree"
     local hidden_repo="$unreadable_subtree/hidden-repo"
     local alias_root="$WORKSPACE/m5-t2/scan-alias"
@@ -4234,6 +4709,9 @@ function test_m5_t2_repository_discovery {
     local hash_output=""
     local hash_one=""
     local hash_two=""
+    local short_hostname=""
+    local norm_one_name=""
+    local norm_two_name=""
 
     create_tmux_root m5-t2
     root="$NEW_TMUX_ROOT"
@@ -4247,6 +4725,7 @@ function test_m5_t2_repository_discovery {
     init_git_repository "$shared_two"
     init_git_repository "$norm_one"
     init_git_repository "$norm_two"
+    init_git_repository "$newline_repo"
     init_git_repository "$hidden_repo"
     chmod 000 "$unreadable_subtree"
     ln -s -- "$scan_root" "$alias_root"
@@ -4274,6 +4753,7 @@ function test_m5_t2_repository_discovery {
     assert_repository_row_count "$LAST_TRANSCRIPT" "$shared_two" 1
     assert_repository_row_count "$LAST_TRANSCRIPT" "$norm_one" 1
     assert_repository_row_count "$LAST_TRANSCRIPT" "$norm_two" 1
+    assert_repository_row_count "$LAST_TRANSCRIPT" "$newline_repo" 0
     assert_repository_row_count "$LAST_TRANSCRIPT" "$hidden_repo" 0
     assert_repository_row_count "$LAST_TRANSCRIPT" "$bare_repo" 0
     assert_repository_row_count "$LAST_TRANSCRIPT" "$ordinary_dir" 0
@@ -4283,6 +4763,10 @@ function test_m5_t2_repository_discovery {
         "second duplicate repository label is not minimum-parent"
     assert_contains "$LAST_TRANSCRIPT" "$unreadable_subtree" \
         "unreadable child warning omitted its path"
+    assert_contains "$LAST_TRANSCRIPT" \
+        "repository path contains a newline: $(encode_state_field \
+            "$newline_repo")" \
+        "newline repository warning omitted its encoded path"
 
     stem_one="${norm_one#/}"
     stem_one="${stem_one//\//-}"
@@ -4296,6 +4780,11 @@ function test_m5_t2_repository_discovery {
     hash_one="${hash_output%% *}"
     hash_output=$(printf '%s' "$norm_two" | sha256sum)
     hash_two="${hash_output%% *}"
+    short_hostname=$(hostname -s)
+    short_hostname="${short_hostname//./_}"
+    short_hostname="${short_hostname//:/_}"
+    norm_one_name="${stem_one}-${hash_one:0:12}-${short_hostname}"
+    norm_two_name="${stem_two}-${hash_two:0:12}-${short_hostname}"
     assert_contains "$LAST_TRANSCRIPT" \
         "${stem_one}-${hash_one:0:12}  $norm_one" \
         "first normalized catalog collision omitted its path hash"
@@ -4321,12 +4810,51 @@ function test_m5_t2_repository_discovery {
     stop_state_monitor m5-t2-second
     chmod 0700 "$unreadable_subtree"
     assert_last_pty_failed_without_timeout "second catalog inspection"
+
+    create_tmux_root m5-t2-first-order
+    first_order_root="$NEW_TMUX_ROOT"
+    run_repo_selection_success m5-t2-first-order-one "$first_order_root" \
+        "$home" "$xdg_home" "$norm_one_name" "$norm_one"
+    run_repo_selection_success m5-t2-first-order-two "$first_order_root" \
+        "$home" "$xdg_home" "$norm_two_name" "$norm_two"
+    assert_equal "$norm_one_name" \
+        "$(session_name_for_path "$first_order_root" "$norm_one")" \
+        "first selection order changed the first normalized session name"
+    assert_equal "$norm_two_name" \
+        "$(session_name_for_path "$first_order_root" "$norm_two")" \
+        "first selection order changed the second normalized session name"
+    assert_equal "$norm_one" \
+        "$(pane_directory "$first_order_root" "$norm_one_name")" \
+        "first selection order opened the first normalized repository elsewhere"
+    assert_equal "$norm_two" \
+        "$(pane_directory "$first_order_root" "$norm_two_name")" \
+        "first selection order opened the second normalized repository elsewhere"
+
+    create_tmux_root m5-t2-second-order
+    second_order_root="$NEW_TMUX_ROOT"
+    run_repo_selection_success m5-t2-second-order-two "$second_order_root" \
+        "$home" "$xdg_home" "$norm_two_name" "$norm_two"
+    run_repo_selection_success m5-t2-second-order-one "$second_order_root" \
+        "$home" "$xdg_home" "$norm_one_name" "$norm_one"
+    assert_equal "$norm_one_name" \
+        "$(session_name_for_path "$second_order_root" "$norm_one")" \
+        "opposite selection order changed the first normalized session name"
+    assert_equal "$norm_two_name" \
+        "$(session_name_for_path "$second_order_root" "$norm_two")" \
+        "opposite selection order changed the second normalized session name"
+    assert_equal "$norm_one" \
+        "$(pane_directory "$second_order_root" "$norm_one_name")" \
+        "opposite selection order opened the first normalized repository elsewhere"
+    assert_equal "$norm_two" \
+        "$(pane_directory "$second_order_root" "$norm_two_name")" \
+        "opposite selection order opened the second normalized repository elsewhere"
     pass_test M5-T2 "real Git discovery, deduplication, and stable labels"
 }
 
 function test_m5_t3_repository_selection {
     local root=""
     local opposite_root=""
+    local ambient_root=""
     local home="$WORKSPACE/m5-t3/home"
     local xdg_home="$WORKSPACE/m5-t3/xdg"
     local repos_file="$xdg_home/tmux-runner/repos"
@@ -4335,11 +4863,13 @@ function test_m5_t3_repository_selection {
     local right_repo="$catalog_root/right/shared"
     local concurrent_repo="$catalog_root/concurrent"
     local legacy_repo="$catalog_root/legacy"
+    local ambient_repository="$WORKSPACE/m5-t3/ambient"
     local short_hostname=""
     local left_name=""
     local right_name=""
     local concurrent_name=""
     local identity_before=""
+    local number=""
 
     create_tmux_root m5-t3
     root="$NEW_TMUX_ROOT"
@@ -4348,6 +4878,7 @@ function test_m5_t3_repository_selection {
     init_git_repository "$right_repo"
     init_git_repository "$concurrent_repo"
     init_git_repository "$legacy_repo"
+    init_git_repository "$ambient_repository"
     printf '%s\n' "$catalog_root" > "$repos_file"
     short_hostname=$(hostname -s)
     short_hostname="${short_hostname//./_}"
@@ -4396,6 +4927,29 @@ function test_m5_t3_repository_selection {
     assert_equal "$right_repo" \
         "$(session_path "$opposite_root" "$right_name")" \
         "opposite selection order changed the right catalog identity"
+
+    create_tmux_root m5-t3-ambient
+    ambient_root="$NEW_TMUX_ROOT"
+    start_pty_command m5-t3-ambient "$ambient_root" "$home" "$xdg_home" \
+        env GIT_DIR="$ambient_repository/.git" \
+        GIT_WORK_TREE="$ambient_repository" bash -x "$RUNNER" repo
+    if ! wait_for_transcript_text "Select repository:"; then
+        fail_test "ambient Git repository selection did not display its prompt"
+    fi
+    number=$(repository_selection_number "$LAST_TRANSCRIPT" "$left_repo")
+    if [[ -z "$number" ]]; then
+        fail_test "ambient Git repository selection omitted the target"
+    fi
+    send_current_input "$number\n"
+    if ! wait_for_client_session "$ambient_root" "$left_name"; then
+        fail_test "ambient Git repository selection did not reach $left_name"
+    fi
+    detach_current_client
+    finish_current_pty
+    assert_last_pty_succeeded "ambient Git repository selection failed"
+    assert_equal "$left_repo" \
+        "$(session_path "$ambient_root" "$left_name")" \
+        "ambient Git controls changed repository selection identity"
     pass_test M5-T3 "catalogued create, reuse, concurrency, and legacy reuse"
 }
 
@@ -4476,6 +5030,28 @@ function test_m5_t4_repository_failures {
     assert_contains "$LAST_TRANSCRIPT" "no longer a Git working tree" \
         "changed repository error omitted revalidation guidance"
 
+    start_state_monitor m5-t4-final-recheck "$root"
+    start_entry_gated_runner_outside m5-t4-final-recheck "$root" "$home" \
+        "$xdg_home" "$RUNNER" list-sessions repo
+    wait_for_transcript_text "Select repository:" || \
+        fail_test "final repository recheck case omitted its prompt"
+    number=$(repository_selection_number "$LAST_TRANSCRIPT" "$repository")
+    send_current_input "$number\n"
+    if ! wait_for_file "$ENTRY_GATE_READY"; then
+        fail_test "final repository recheck did not reach its entry gate"
+    fi
+    mv -- "$repository/.git" "$repository/.git.final-recheck"
+    release_entry_gate
+    finish_current_pty
+    mv -- "$repository/.git.final-recheck" "$repository/.git"
+    ENTRY_GATE_READY=""
+    ENTRY_GATE_RELEASE=""
+    stop_state_monitor m5-t4-final-recheck
+    assert_last_pty_failed_without_timeout "final repository recheck"
+    assert_contains "$LAST_TRANSCRIPT" \
+        "path kind changed before tmux entry" \
+        "final repository recheck error omitted the changed identity"
+
     run_outside_success m5-t4-explicit-one "$root" "$home" "$xdg_home" \
         "$RUNNER" repo-explicit-one create -s repo-explicit-one \
         -c "$repository"
@@ -4531,7 +5107,10 @@ function test_m6_t1_recent_navigation {
     local repos_file="$xdg_home/tmux-runner/repos"
     local catalog_root="$WORKSPACE/m6-t1/catalog"
     local repository_b="$catalog_root/repo-b"
+    local ambient_repository="$WORKSPACE/m6-t1/ambient"
     local path_a="$WORKSPACE/m6-t1/path-a"
+    local repository_git_backup="$repository_b/.git.saved"
+    local path_a_git_backup="$WORKSPACE/m6-t1/path-a.git"
     local bulk_root="$WORKSPACE/m6-t1/bulk"
     local short_hostname=""
     local repository_b_name=""
@@ -4541,6 +5120,7 @@ function test_m6_t1_recent_navigation {
     local suffix=""
     local expected_paths=""
     local actual_paths=""
+    local snapshot_before=""
     local number=""
     local index=0
     local -a bulk_paths=()
@@ -4552,6 +5132,7 @@ function test_m6_t1_recent_navigation {
     state_file="$state_directory/state"
     mkdir -p -- "$home" "${repos_file%/*}" "$path_a" "$bulk_root"
     init_git_repository "$repository_b"
+    init_git_repository "$ambient_repository"
     printf '%s\n' "$catalog_root" > "$repos_file"
     short_hostname=$(hostname -s)
     short_hostname="${short_hostname//./_}"
@@ -4563,6 +5144,92 @@ function test_m6_t1_recent_navigation {
         "$RUNNER" m6-a create -s m6-a -c "$path_a"
     run_repo_selection_success m6-t1-repo-b "$root" "$home" \
         "$xdg_home" "$repository_b_name" "$repository_b"
+    start_pty_command m6-t1-recent-ambient "$root" "$home" "$xdg_home" \
+        env GIT_DIR="$ambient_repository/.git" \
+        GIT_WORK_TREE="$ambient_repository" bash -x "$RUNNER" recent
+    if ! wait_for_transcript_text "Select recent destination:"; then
+        fail_test "ambient Git recent selection did not display its prompt"
+    fi
+    number=$(recent_selection_number "$LAST_TRANSCRIPT" "$repository_b")
+    if [[ -z "$number" ]]; then
+        fail_test "ambient Git recent selection omitted the target"
+    fi
+    send_current_input "$number\n"
+    if ! wait_for_client_session "$root" "$repository_b_name"; then
+        fail_test "ambient Git recent selection did not reach $repository_b_name"
+    fi
+    detach_current_client
+    finish_current_pty
+    assert_last_pty_succeeded "ambient Git recent selection failed"
+    assert_equal "$repository_b" \
+        "$(session_path "$root" "$repository_b_name")" \
+        "ambient Git controls changed recent destination identity"
+    assert_equal "git" \
+        "$(state_recent_kind_for_path "$state_file" "$repository_b")" \
+        "Git recent destination did not retain its kind"
+    assert_equal "plain" \
+        "$(state_recent_kind_for_path "$state_file" "$path_a")" \
+        "plain recent destination did not retain its kind"
+
+    snapshot_before=$(state_snapshot "$state_directory")
+    start_state_monitor m6-t1-recent-final-recheck "$root"
+    start_entry_gated_runner_outside m6-t1-recent-final-recheck "$root" \
+        "$home" "$xdg_home" "$RUNNER" list-sessions recent
+    if ! wait_for_transcript_text "Select recent destination:"; then
+        fail_test "final recent recheck case did not display its prompt"
+    fi
+    number=$(recent_selection_number "$LAST_TRANSCRIPT" "$repository_b")
+    if [[ -z "$number" ]]; then
+        fail_test "final recent recheck case omitted the target"
+    fi
+    send_current_input "$number\n"
+    if ! wait_for_file "$ENTRY_GATE_READY"; then
+        fail_test "final recent recheck did not reach its entry gate"
+    fi
+    mv -- "$repository_b/.git" "$repository_git_backup"
+    release_entry_gate
+    finish_current_pty
+    mv -- "$repository_git_backup" "$repository_b/.git"
+    ENTRY_GATE_READY=""
+    ENTRY_GATE_RELEASE=""
+    stop_state_monitor m6-t1-recent-final-recheck
+    assert_last_pty_failed_without_timeout "final recent recheck"
+    assert_contains "$LAST_TRANSCRIPT" \
+        "path kind changed before tmux entry" \
+        "final recent recheck error omitted the changed identity"
+    assert_equal "$snapshot_before" "$(state_snapshot "$state_directory")" \
+        "final recent recheck changed navigation state"
+
+    mv -- "$repository_b/.git" "$repository_git_backup"
+    start_runner_outside m6-t1-recent-git-to-plain "$root" "$home" \
+        "$xdg_home" "$RUNNER" recent
+    if ! wait_for_transcript_text "Select recent destination:"; then
+        fail_test "Git-to-plain recent case did not display its prompt"
+    fi
+    number=$(recent_selection_number "$LAST_TRANSCRIPT" "$repository_b")
+    assert_equal "" "$number" \
+        "Git-to-plain destination remained eligible in recent"
+    send_current_input 'not-a-number\n'
+    finish_current_pty
+    assert_last_pty_failed_without_timeout \
+        "Git-to-plain recent inspection"
+    mv -- "$repository_git_backup" "$repository_b/.git"
+
+    git -C "$path_a" init -q
+    start_runner_outside m6-t1-recent-plain-to-git "$root" "$home" \
+        "$xdg_home" "$RUNNER" recent
+    if ! wait_for_transcript_text "Select recent destination:"; then
+        fail_test "plain-to-Git recent case did not display its prompt"
+    fi
+    number=$(recent_selection_number "$LAST_TRANSCRIPT" "$path_a")
+    assert_equal "" "$number" \
+        "plain-to-Git destination remained eligible in recent"
+    send_current_input 'not-a-number\n'
+    finish_current_pty
+    assert_last_pty_failed_without_timeout \
+        "plain-to-Git recent inspection"
+    mv -- "$path_a/.git" "$path_a_git_backup"
+
     identity_before=$(session_identity "$root" m6-a)
     run_recent_selection_success m6-t1-recent-reuse "$root" "$home" \
         "$xdg_home" "$RUNNER" m6-a "$path_a"
@@ -4581,6 +5248,8 @@ function test_m6_t1_recent_navigation {
         "direct unmarked attachment changed recent paths"
     run_outside_success m6-t1-direct-last "$root" "$home" "$xdg_home" \
         "$RUNNER" "$repository_b_name" last
+    assert_session_entry_trace "$LAST_TRANSCRIPT" "$root" \
+        "$repository_b_name" "last did not target the resolved session ID"
     run_list_selection_success m6-t1-list-marked "$root" "$home" \
         "$xdg_home" "$RUNNER" m6-a
     recent_before_unmarked=$(state_record_values recent "$state_file")
@@ -4643,11 +5312,21 @@ function test_m6_t1_recent_navigation {
 
 function test_m6_t2_previous_navigation {
     local root=""
+    local other_root=""
+    local legacy_root=""
     local home="$WORKSPACE/m6-t2/home"
     local xdg_home="$WORKSPACE/m6-t2/xdg"
     local state_home="$WORKSPACE/m6-t2/state-home"
+    local legacy_state_home="$WORKSPACE/m6-t2/legacy-state-home"
     local state_directory=""
     local state_file=""
+    local legacy_path="$WORKSPACE/m6-t2/legacy-path"
+    local legacy_git="$WORKSPACE/m6-t2/legacy-git"
+    local legacy_name=""
+    local server_identity=""
+    local other_server_identity=""
+    local legacy_server_identity=""
+    local short_hostname=""
     local fingerprint_before=""
     local expected_sessions=""
 
@@ -4659,7 +5338,7 @@ function test_m6_t2_previous_navigation {
     mkdir -p -- "$home" "$xdg_home"
     run_tmux "$root" -f /dev/null new-session -d -s m6-last-a
     run_tmux "$root" new-session -d -s m6-last-b
-    fingerprint_before=$(server_fingerprint "$root")
+    fingerprint_before=$(server_identity_fingerprint "$root")
 
     run_outside_success m6-t2-enter-a "$root" "$home" "$xdg_home" \
         "$RUNNER" m6-last-a attach m6-last-a
@@ -4674,29 +5353,109 @@ function test_m6_t2_previous_navigation {
 
     run_inside_success m6-t2-inside-a "$root" "$home" "$xdg_home" \
         m6-last-b m6-last-a "$RUNNER" last
-    assert_contains "$LAST_INSIDE_TRACE" \
-        "$TMUX_RUNNER_TRACE_PREFIX switch-client -t =m6-last-a" \
+    assert_session_entry_trace "$LAST_INSIDE_TRACE" "$root" m6-last-a \
         "inside last did not switch exactly to A"
     run_inside_success m6-t2-inside-b "$root" "$home" "$xdg_home" \
         m6-last-a m6-last-b "$RUNNER" last
-    assert_contains "$LAST_INSIDE_TRACE" \
-        "$TMUX_RUNNER_TRACE_PREFIX switch-client -t =m6-last-b" \
+    assert_session_entry_trace "$LAST_INSIDE_TRACE" "$root" m6-last-b \
         "inside last did not switch exactly to B"
 
+    create_tmux_root m6-t2-other
+    other_root="$NEW_TMUX_ROOT"
+    run_tmux "$other_root" -f /dev/null new-session -d -s m6-other-a
+    run_tmux "$other_root" new-session -d -s m6-other-b
+    run_outside_failure m6-t2-other-empty-last "$other_root" "$home" \
+        "$xdg_home" "$RUNNER" last
+    assert_contains "$LAST_TRANSCRIPT" \
+        "no previous runner session is available" \
+        "last used session history from another runner server"
+    run_outside_success m6-t2-other-enter-a "$other_root" "$home" \
+        "$xdg_home" "$RUNNER" m6-other-a attach m6-other-a
+    run_outside_success m6-t2-other-enter-b "$other_root" "$home" \
+        "$xdg_home" "$RUNNER" m6-other-b attach m6-other-b
+    run_outside_success m6-t2-other-last-a "$other_root" "$home" \
+        "$xdg_home" "$RUNNER" m6-other-a last
+    run_outside_success m6-t2-original-last-a "$root" "$home" \
+        "$xdg_home" "$RUNNER" m6-last-a last
+
+    server_identity=$(runner_socket_path_for_root "$root")
+    other_server_identity=$(runner_socket_path_for_root "$other_root")
     expected_sessions=$(printf '%s\n%s\n' \
-        "$(encode_state_field m6-last-b)" \
-        "$(encode_state_field m6-last-a)")
+        "$(encode_state_field m6-last-a)" \
+        "$(encode_state_field m6-last-b)")
     assert_equal "$expected_sessions" \
-        "$(state_record_values session "$state_file")" \
-        "last did not retain the two latest distinct sessions"
+        "$(state_session_values_for_server "$state_file" \
+            "$server_identity")" \
+        "last did not retain two sessions for the original server"
+    expected_sessions=$(printf '%s\n%s\n' \
+        "$(encode_state_field m6-other-a)" \
+        "$(encode_state_field m6-other-b)")
+    assert_equal "$expected_sessions" \
+        "$(state_session_values_for_server "$state_file" \
+            "$other_server_identity")" \
+        "last did not retain two sessions for the other server"
     assert_equal "" "$(state_record_values recent "$state_file")" \
         "unmarked last navigation created a recent path"
-    assert_equal "$fingerprint_before" "$(server_fingerprint "$root")" \
+    assert_equal "$fingerprint_before" \
+        "$(server_identity_fingerprint "$root")" \
         "last navigation changed session, window, or pane identity"
     assert_state_modes "$state_directory"
     assert_no_state_transactions "$state_directory"
+
+    create_tmux_root m6-t2-legacy
+    legacy_root="$NEW_TMUX_ROOT"
+    export XDG_STATE_HOME="$legacy_state_home"
+    state_directory=$(runner_state_directory_for "$legacy_state_home")
+    state_file="$state_directory/state"
+    mkdir -p -- "$state_directory" "$legacy_path"
+    init_git_repository "$legacy_git"
+    chmod 0700 "$state_directory"
+    {
+        printf 'version\t1\n'
+        printf 'sequence\t4\n'
+        printf 'session\t4\t%s\n' "$(encode_state_field legacy-b)"
+        printf 'session\t3\t%s\n' "$(encode_state_field legacy-a)"
+        printf 'recent\t2\t%s\n' "$(encode_state_field "$legacy_git")"
+        printf 'recent\t1\t%s\n' "$(encode_state_field "$legacy_path")"
+    } > "$state_file"
+    chmod 0600 "$state_file"
+    run_tmux "$legacy_root" -f /dev/null new-session -d -s legacy-a
+    run_tmux "$legacy_root" new-session -d -s legacy-b
+    run_outside_failure m6-t2-legacy-last "$legacy_root" "$home" \
+        "$xdg_home" "$RUNNER" last
+    assert_contains "$LAST_TRANSCRIPT" \
+        "no previous runner session is available" \
+        "v1 session history remained eligible for last"
+    short_hostname=$(hostname -s)
+    short_hostname="${short_hostname//./_}"
+    short_hostname="${short_hostname//:/_}"
+    legacy_name="legacy-path-$short_hostname"
+    run_recent_selection_success m6-t2-legacy-recent "$legacy_root" \
+        "$home" "$xdg_home" "$RUNNER" "$legacy_name" "$legacy_path"
+    assert_contains "$state_file" $'version\t2' \
+        "successful v1 recent migration did not write state v2"
+    legacy_server_identity=$(runner_socket_path_for_root "$legacy_root")
+    assert_equal "$(encode_state_field "$legacy_name")" \
+        "$(state_session_values_for_server "$state_file" \
+            "$legacy_server_identity")" \
+        "v1 session history survived migration into server-scoped state"
+    expected_sessions=$(printf '%s\n%s\n' \
+        "$(encode_state_field "$legacy_path")" \
+        "$(encode_state_field "$legacy_git")")
+    assert_equal "$expected_sessions" \
+        "$(state_record_values recent "$state_file")" \
+        "v1 recent paths did not survive state migration"
+    assert_equal "plain" \
+        "$(state_recent_kind_for_path "$state_file" "$legacy_path")" \
+        "v1 recent path did not acquire its current kind"
+    assert_equal "git" \
+        "$(state_recent_kind_for_path "$state_file" "$legacy_git")" \
+        "v1 Git recent path did not acquire its current kind"
+    assert_state_modes "$state_directory"
+    assert_no_state_transactions "$state_directory"
     unset XDG_STATE_HOME
-    pass_test M6-T2 "outside and inside previous-session alternation"
+    pass_test M6-T2 \
+        "server-scoped previous-session alternation and v1 migration"
 }
 
 function exercise_m6_t3_data_failures {
@@ -4796,9 +5555,12 @@ function exercise_m6_t3_data_failures {
 
     {
         printf '%s\n' 'malformed-line'
-        printf 'recent\tbad-sequence\t%s\n' "$malicious_path"
-        printf 'recent\t999\t%s%%GG\n' "$malicious_path"
-        printf 'recent\t998\t%s\n' "$malicious_path"
+        printf 'future-field\tvalue\n'
+        printf 'recent\tbad-sequence\tplain\t%s\n' "$malicious_path"
+        printf 'recent\t999\tplain\t%s%%GG\n' "$malicious_path"
+        printf 'recent\t998\tplain\t%s\n' "$malicious_path"
+        printf 'recent\t997\tunknown\t%s\n' "$malicious_path"
+        printf 'session\t996\trelative-server\tmalformed-session\n'
     } >> "$state_file"
     run_recent_selection_success m6-t3-malformed-valid "$root" "$home" \
         "$xdg_home" "$RUNNER" m6-data-special "$special_path"
@@ -4807,11 +5569,15 @@ function exercise_m6_t3_data_failures {
     fi
     assert_not_contains "$state_file" "malformed-line" \
         "successful update retained a malformed state row"
+    assert_not_contains "$state_file" $'future-field\tvalue' \
+        "successful update retained an unknown state row"
+    assert_not_contains "$state_file" "malformed-session" \
+        "successful update retained a relative server identity"
     assert_contains "$state_file" "$encoded_special" \
         "valid special path did not survive malformed rows"
 
     cp "$state_file" "$valid_backup"
-    sed 's/^version\t1$/version\t999/' "$valid_backup" > "$state_file"
+    sed 's/^version\t2$/version\t999/' "$valid_backup" > "$state_file"
     snapshot_before=$(state_snapshot "$state_directory")
     fingerprint_before=$(server_fingerprint "$root")
     start_runner_outside m6-t3-future-version "$root" "$home" "$xdg_home" \
@@ -4854,7 +5620,7 @@ function exercise_m6_t3_lock_timeout {
     state_file="$state_directory/state"
     mkdir -p -- "$home" "$xdg_home" "$state_directory"
     chmod 0700 "$state_directory"
-    printf 'version\t1\nsequence\t0\n' > "$state_file"
+    printf 'version\t2\nsequence\t0\n' > "$state_file"
     chmod 0600 "$state_file"
     snapshot_before=$(state_snapshot "$state_directory")
 
@@ -5030,6 +5796,9 @@ function exercise_m6_t3_transactions {
     finish_current_pty
     assert_last_pty_failed_without_timeout \
         "unacknowledged orphan reconciliation input"
+    assert_contains "$LAST_TRANSCRIPT" \
+        "recent selection must be a number" \
+        "unacknowledged orphan recovery did not reach input validation"
     assert_equal "$digest_before" \
         "$(sha256sum "$state_file" | awk '{ print $1 }')" \
         "unacknowledged orphan changed committed state"
@@ -5045,6 +5814,8 @@ function exercise_m6_t3_transactions {
         "acknowledged orphan pending transaction"
     crash_current_pty_after_acknowledgment m6-t3-ack-orphan \
         "$pending_file"
+    assert_no_session_entry_hooks "$root" \
+        "acknowledged runner death left a temporary entry hook"
     start_runner_outside m6-t3-ack-reconcile "$root" "$home" \
         "$xdg_home" "$RUNNER" recent
     if ! wait_for_transcript_text "Select recent destination:"; then
@@ -5054,6 +5825,9 @@ function exercise_m6_t3_transactions {
     finish_current_pty
     assert_last_pty_failed_without_timeout \
         "acknowledged orphan reconciliation input"
+    assert_contains "$LAST_TRANSCRIPT" \
+        "recent selection must be a number" \
+        "acknowledged orphan recovery did not precede input validation"
     assert_equal "$(encode_state_field m6-tx-b)" \
         "$(state_record_values session "$state_file" | sed -n '1p')" \
         "acknowledged orphan was not committed"
@@ -5095,11 +5869,196 @@ function exercise_m6_t3_transactions {
     unset XDG_STATE_HOME
 }
 
+function corrupt_transaction_record {
+    local record_file="$1"
+    local record_kind="$2"
+    local corruption="$3"
+    local target_record=""
+    local target_line=""
+    local line=""
+    local record_type=""
+    local inode_before=""
+    local target_count=0
+    local -a lines=()
+
+    case "$record_kind" in
+        pending)
+            target_record=kind
+            ;;
+        ack)
+            target_record=sequence
+            ;;
+        *)
+            fail_test "unknown transaction record kind: $record_kind"
+            ;;
+    esac
+    case "$corruption" in
+        missing | duplicate | unknown | raw-tab)
+            ;;
+        *)
+            fail_test "unknown transaction record corruption: $corruption"
+            ;;
+    esac
+
+    inode_before=$(stat -c '%i' "$record_file")
+    mapfile -t lines < "$record_file"
+    for line in "${lines[@]}"; do
+        record_type="${line%%$'\t'*}"
+        if [[ "$record_type" == "$target_record" ]]; then
+            target_line="$line"
+            target_count=$((target_count + 1))
+        fi
+    done
+    if (( target_count != 1 )); then
+        fail_test "$record_kind record does not contain one $target_record row"
+    fi
+
+    : > "$record_file"
+    for line in "${lines[@]}"; do
+        record_type="${line%%$'\t'*}"
+        if [[ "$record_type" != "$target_record" ]]; then
+            printf '%s\n' "$line" >> "$record_file"
+            continue
+        fi
+        case "$corruption" in
+            missing)
+                ;;
+            raw-tab)
+                printf '%s\textra\n' "$line" >> "$record_file"
+                ;;
+            *)
+                printf '%s\n' "$line" >> "$record_file"
+                ;;
+        esac
+    done
+    case "$corruption" in
+        duplicate)
+            printf '%s\n' "$target_line" >> "$record_file"
+            ;;
+        unknown)
+            printf 'future-field\tvalue\n' >> "$record_file"
+            ;;
+    esac
+    assert_equal "$inode_before" "$(stat -c '%i' "$record_file")" \
+        "$record_kind $corruption corruption replaced the locked record"
+}
+
+function exercise_strict_pending_rejection {
+    local root="$1"
+    local home="$2"
+    local xdg_home="$3"
+    local state_directory="$4"
+    local corruption="$5"
+    local label="m6-t3-strict-pending-$corruption"
+    local pending_file=""
+    local snapshot_before=""
+
+    snapshot_before=$(state_snapshot "$state_directory")
+    start_gated_runner_outside "$label" "$root" "$home" "$xdg_home" \
+        "$RUNNER" m6-strict-pending attach m6-strict-pending
+    if ! wait_for_pending_file "$state_directory"; then
+        fail_test "$label did not publish a transaction"
+    fi
+    pending_file="$LAST_PENDING_FILE"
+    corrupt_transaction_record "$pending_file" pending "$corruption"
+    release_attach_gate
+    if ! wait_for_client_session "$root" m6-strict-pending; then
+        fail_test "$label did not attach its client"
+    fi
+    detach_current_client
+    finish_current_pty
+    ATTACH_GATE_READY=""
+    ATTACH_GATE_RELEASE=""
+    assert_last_pty_failed_without_timeout "$label unexpectedly succeeded"
+    assert_contains "$LAST_TRANSCRIPT" \
+        "session entry was not acknowledged: m6-strict-pending" \
+        "$label did not report its missing acknowledgment"
+    assert_equal "$snapshot_before" "$(state_snapshot "$state_directory")" \
+        "$label changed committed state"
+    assert_no_state_transactions "$state_directory"
+}
+
+function exercise_strict_ack_rejection {
+    local root="$1"
+    local home="$2"
+    local xdg_home="$3"
+    local state_directory="$4"
+    local corruption="$5"
+    local label="m6-t3-strict-ack-$corruption"
+    local pending_file=""
+    local ack_file=""
+    local snapshot_before=""
+
+    snapshot_before=$(state_snapshot "$state_directory")
+    start_gated_runner_outside "$label" "$root" "$home" "$xdg_home" \
+        "$RUNNER" m6-strict-ack attach m6-strict-ack
+    if ! wait_for_pending_file "$state_directory"; then
+        fail_test "$label did not publish a transaction"
+    fi
+    pending_file="$LAST_PENDING_FILE"
+    ack_file=$(acknowledged_record_for_pending "$pending_file")
+    start_state_lock_holder "$label" "$state_directory"
+    release_attach_gate
+    if ! wait_for_pending_ack "$pending_file"; then
+        fail_test "$label did not publish an acknowledgment"
+    fi
+    corrupt_transaction_record "$ack_file" ack "$corruption"
+    stop_state_lock_holder "$label"
+    if ! wait_for_client_session "$root" m6-strict-ack; then
+        fail_test "$label did not attach its client"
+    fi
+    detach_current_client
+    finish_current_pty
+    ATTACH_GATE_READY=""
+    ATTACH_GATE_RELEASE=""
+    assert_last_pty_succeeded "$label attachment failed"
+    assert_equal "$snapshot_before" "$(state_snapshot "$state_directory")" \
+        "$label changed committed state"
+    assert_no_state_transactions "$state_directory"
+}
+
+function exercise_m6_t3_strict_transactions {
+    local root=""
+    local home="$WORKSPACE/m6-t3-strict/home"
+    local xdg_home="$WORKSPACE/m6-t3-strict/xdg"
+    local state_home="$WORKSPACE/m6-t3-strict/state-home"
+    local state_directory=""
+    local seed_path="$WORKSPACE/m6-t3-strict/seed"
+    local pending_path="$WORKSPACE/m6-t3-strict/pending"
+    local ack_path="$WORKSPACE/m6-t3-strict/ack"
+    local corruption=""
+    local -a corruptions=(missing duplicate unknown raw-tab)
+
+    create_tmux_root m6-t3-strict
+    root="$NEW_TMUX_ROOT"
+    export XDG_STATE_HOME="$state_home"
+    state_directory=$(runner_state_directory_for "$state_home")
+    mkdir -p -- "$home" "$xdg_home" "$seed_path" "$pending_path" \
+        "$ack_path"
+    run_outside_success m6-t3-strict-seed "$root" "$home" "$xdg_home" \
+        "$RUNNER" m6-strict-seed create -s m6-strict-seed -c "$seed_path"
+    run_tmux "$root" new-session -d -s m6-strict-pending -c "$pending_path"
+    run_tmux "$root" set-option -t '=m6-strict-pending:' \
+        @tmux-runner-path "$pending_path"
+    run_tmux "$root" new-session -d -s m6-strict-ack -c "$ack_path"
+    run_tmux "$root" set-option -t '=m6-strict-ack:' \
+        @tmux-runner-path "$ack_path"
+
+    for corruption in "${corruptions[@]}"; do
+        exercise_strict_pending_rejection "$root" "$home" "$xdg_home" \
+            "$state_directory" "$corruption"
+        exercise_strict_ack_rejection "$root" "$home" "$xdg_home" \
+            "$state_directory" "$corruption"
+    done
+    unset XDG_STATE_HOME
+}
+
 function test_m6_t3_state_failures_and_recovery {
     exercise_m6_t3_data_failures
     exercise_m6_t3_lock_timeout
     exercise_m6_t3_post_handoff_lock
     exercise_m6_t3_transactions
+    exercise_m6_t3_strict_transactions
     pass_test M6-T3 \
         "state failures, acknowledgment ordering, rollback, and orphan recovery"
 }
@@ -5119,10 +6078,14 @@ function test_m6_t4_concurrent_state {
     local expected_paths=""
     local actual_paths=""
     local expected_sessions=""
+    local noncanonical_state="$WORKSPACE/m6-t4/noncanonical-state"
     local index=0
+    local hook_name=""
+    local target_id=""
     local -a concurrent_sessions=()
     local -a concurrent_paths=()
     local -a overflow_paths=()
+    local -A entry_hook_names=()
 
     create_tmux_root m6-t4
     root="$NEW_TMUX_ROOT"
@@ -5158,6 +6121,11 @@ function test_m6_t4_concurrent_state {
     if ! validate_main_state_record "$state_file"; then
         fail_test "concurrent updates left an invalid main state record"
     fi
+    cp -p -- "$state_file" "$noncanonical_state"
+    printf 'applied\t1\n' >> "$noncanonical_state"
+    if validate_main_state_record "$noncanonical_state"; then
+        fail_test "canonical validator accepted an unowned applied row"
+    fi
     expected_paths=$(printf '%s\n' "${concurrent_paths[@]}" | \
         while IFS= read -r path; do encode_state_field "$path"; done | \
         LC_ALL=C sort)
@@ -5165,6 +6133,24 @@ function test_m6_t4_concurrent_state {
     assert_equal "$expected_paths" "$actual_paths" \
         "concurrent updates lost or duplicated a recent path"
     finish_concurrent_state_entries m6-t4 "$root"
+    for ((index = 1; index <= ${#concurrent_sessions[@]}; index++)); do
+        if ! hook_name=$(entry_hook_name_from_trace \
+                "$WORKSPACE/pty/m6-t4-$index.typescript"); then
+            fail_test "concurrent entry omitted its transaction hook"
+        fi
+        if [[ -n "${entry_hook_names[$hook_name]:-}" ]]; then
+            fail_test "concurrent entries reused a transaction hook"
+        fi
+        entry_hook_names[$hook_name]=1
+        target_id=$(session_id "$root" \
+            "${concurrent_sessions[index - 1]}")
+        assert_entry_command_targets_id \
+            "$WORKSPACE/pty/m6-t4-$index.typescript" "$target_id" \
+            "concurrent entry did not target its resolved session ID"
+        assert_session_entry_hook_trace \
+            "$WORKSPACE/pty/m6-t4-$index.typescript" "$root" \
+            "concurrent entry hook did not match or clean its transaction"
+    done
 
     for ((index = 1; index <= 21; index++)); do
         printf -v suffix '%02d' "$index"
@@ -5256,6 +6242,402 @@ function test_m6_t5_interface_regression {
         "installed navigation, interface, documentation, and cleanup regression"
 }
 
+function create_legacy_marked_session {
+    local root="$1"
+    local session_name="$2"
+    local session_path="$3"
+
+    run_tmux "$root" new-session -d -s "$session_name" -c "$session_path"
+    run_tmux "$root" set-option -t "=$session_name:" \
+        @tmux-runner-path "$session_path"
+}
+
+function finish_m7_outside_identity_failure {
+    local label="$1"
+    local root="$2"
+    local state_directory="$3"
+    local snapshot_before="$4"
+    local ack_file="$5"
+    local acknowledgment_observed=0
+
+    start_state_lock_holder "$label-ack-observation" "$state_directory"
+    release_entry_gate
+    if ! wait_for_file "$ENTRY_GATE_DONE"; then
+        stop_state_lock_holder "$label-ack-observation"
+        fail_test "$label guarded tmux call did not finish"
+    fi
+    if [[ -e "$ack_file" ]]; then
+        acknowledgment_observed=1
+    fi
+    stop_state_lock_holder "$label-ack-observation"
+    if (( acknowledgment_observed )); then
+        fail_test "$label published an acknowledgment"
+    fi
+    finish_current_pty
+    ENTRY_GATE_READY=""
+    ENTRY_GATE_RELEASE=""
+    ENTRY_GATE_DONE=""
+    assert_last_pty_failed_without_timeout "$label identity guard"
+    assert_equal "" "$(current_client_sessions "$root")" \
+        "$label created a tmux client"
+    [[ ! -e "$ack_file" ]] || fail_test "$label retained an acknowledgment"
+    if ! wait_for_no_state_transactions "$state_directory"; then
+        fail_test "$label did not remove its transaction"
+    fi
+    assert_equal "$snapshot_before" "$(state_snapshot "$state_directory")" \
+        "$label changed navigation state"
+    assert_no_session_entry_hooks "$root" \
+        "$label left a temporary entry hook"
+}
+
+function exercise_m7_unmarked_marker_normalization {
+    local root="$1"
+    local home="$2"
+    local xdg_home="$3"
+    local state_directory="$4"
+    local conflict_path="$5"
+    local state_file="$state_directory/state"
+    local session_name="m7-unmarked"
+    local target_id=""
+    local pending_file=""
+    local ack_file=""
+    local snapshot_before=""
+    local after_set_option_hook=""
+
+    run_tmux "$root" -f /dev/null new-session -d -s "$session_name"
+    target_id=$(session_id "$root" "$session_name")
+    start_entry_gated_runner_outside m7-unmarked-normalize "$root" \
+        "$home" "$xdg_home" "$RUNNER" set-option attach "$session_name"
+    if ! wait_for_file "$ENTRY_GATE_READY"; then
+        fail_test "unmarked normalization did not reach its barrier"
+    fi
+    run_tmux "$root" set-option -t "${target_id}:" \
+        @tmux-runner-path "$SESSION_PATH_UNMARKED_MARKER"
+    release_entry_gate
+    if ! wait_for_client_session "$root" "$session_name"; then
+        fail_test "concurrent unmarked normalization did not attach"
+    fi
+    detach_current_client
+    finish_current_pty
+    ENTRY_GATE_READY=""
+    ENTRY_GATE_RELEASE=""
+    ENTRY_GATE_DONE=""
+    assert_last_pty_succeeded "concurrent unmarked normalization failed"
+    assert_session_entry_trace "$LAST_TRANSCRIPT" "$root" "$session_name" \
+        "concurrent unmarked normalization did not use its resolved ID"
+    assert_equal "$SESSION_PATH_UNMARKED_MARKER" \
+        "$(raw_session_path_marker "$root" "$session_name")" \
+        "unmarked normalization did not retain its reserved marker"
+    assert_equal "" "$(state_record_values recent "$state_file")" \
+        "reserved unmarked normalization created a recent path"
+    assert_no_state_transactions "$state_directory"
+    run_outside_failure m7-unmarked-explicit-conflict "$root" "$home" \
+        "$xdg_home" "$RUNNER" create -s "$session_name" -c "$conflict_path"
+    assert_contains "$LAST_TRANSCRIPT" \
+        "session $session_name exists without @tmux-runner-path" \
+        "reserved unmarked session did not retain direct-attach guidance"
+
+    snapshot_before=$(state_snapshot "$state_directory")
+    start_entry_gated_runner_outside m7-unmarked-disappear "$root" \
+        "$home" "$xdg_home" "$RUNNER" if-shell attach "$session_name"
+    if ! wait_for_file "$ENTRY_GATE_READY" || \
+        ! wait_for_pending_file "$state_directory"; then
+        fail_test "unmarked disappearance did not reach its entry barrier"
+    fi
+    pending_file="$LAST_PENDING_FILE"
+    ack_file=$(acknowledged_record_for_pending "$pending_file")
+    run_tmux "$root" set-option -g \
+        @tmux-runner-path "$SESSION_PATH_UNMARKED_MARKER"
+    run_tmux "$root" set-option -u -t "${target_id}:" \
+        @tmux-runner-path
+    after_set_option_hook="set-option -g $AFTER_SET_OPTION_SENTINEL yes ; "
+    after_set_option_hook+="set-option -g @tmux-runner-path "
+    after_set_option_hook+="$SESSION_PATH_UNMARKED_MARKER"
+    run_tmux "$root" set-hook -g after-set-option \
+        "$after_set_option_hook"
+    finish_m7_outside_identity_failure m7-unmarked-disappear "$root" \
+        "$state_directory" "$snapshot_before" "$ack_file"
+    assert_contains "$LAST_TRANSCRIPT" \
+        "session entry was not acknowledged: $session_name" \
+        "unmarked disappearance did not report its missing acknowledgment"
+    assert_equal "$SESSION_PATH_GLOBAL_FALLBACK_MARKER" \
+        "$(run_tmux "$root" show-options -gv @tmux-runner-path)" \
+        "entry guard did not replace the colliding global marker"
+    assert_equal "" \
+        "$(run_tmux "$root" show-options -gqv \
+            "$AFTER_SET_OPTION_SENTINEL")" \
+        "entry hook allowed after-set-option to interpose"
+    assert_entry_command_targets_id "$LAST_TRANSCRIPT" "$target_id" \
+        "unmarked disappearance did not target the selected session ID"
+    assert_session_entry_hook_trace "$LAST_TRANSCRIPT" "$root" \
+        "unmarked disappearance hook did not match or clean its transaction"
+    run_tmux "$root" set-hook -gu after-set-option
+}
+
+function exercise_m7_outside_identity_guard {
+    local label="$1"
+    local root="$2"
+    local home="$3"
+    local xdg_home="$4"
+    local state_directory="$5"
+    local session_name="$6"
+    local session_path="$7"
+    local mutation="$8"
+    local old_id=""
+    local new_id=""
+    local old_marker=""
+    local new_marker=""
+    local pending_file=""
+    local ack_file=""
+    local snapshot_before=""
+    local renamed_session="${session_name}-renamed"
+
+    if [[ "$mutation" == "marker" ]]; then
+        run_outside_success "$label-seed" "$root" "$home" "$xdg_home" \
+            "$RUNNER" "$session_name" create -s "$session_name" \
+            -c "$session_path"
+    else
+        create_legacy_marked_session "$root" "$session_name" "$session_path"
+        run_outside_success "$label-seed" "$root" "$home" "$xdg_home" \
+            "$RUNNER" "$session_name" attach "$session_name"
+    fi
+    old_id=$(session_id "$root" "$session_name")
+    old_marker=$(raw_session_path_marker "$root" "$session_name")
+    if [[ "$mutation" == "marker" ]] && [[ "$old_marker" != v1:* ]]; then
+        fail_test "$label runner seed did not write a v1 marker"
+    fi
+    snapshot_before=$(state_snapshot "$state_directory")
+
+    start_entry_gated_runner_outside "$label" "$root" "$home" \
+        "$xdg_home" "$RUNNER" if-shell attach "$session_name"
+    if ! wait_for_file "$ENTRY_GATE_READY" || \
+        ! wait_for_pending_file "$state_directory"; then
+        fail_test "$label did not reach the final entry barrier"
+    fi
+    pending_file="$LAST_PENDING_FILE"
+    ack_file=$(acknowledged_record_for_pending "$pending_file")
+
+    case "$mutation" in
+        replace)
+            run_tmux "$root" kill-session -t "$old_id"
+            create_legacy_marked_session "$root" "$session_name" \
+                "$session_path"
+            new_id=$(session_id "$root" "$session_name")
+            assert_not_equal "$old_id" "$new_id" \
+                "$label replacement retained the selected session ID"
+            assert_equal "$old_marker" \
+                "$(raw_session_path_marker "$root" "$session_name")" \
+                "$label replacement changed the raw marker"
+            ;;
+        marker)
+            new_marker="$session_path"
+            run_tmux "$root" set-option -t "$old_id:" \
+                @tmux-runner-path "$new_marker"
+            assert_equal "$old_id" "$(session_id "$root" "$session_name")" \
+                "$label marker change replaced the selected session"
+            assert_not_equal "$old_marker" \
+                "$(raw_session_path_marker "$root" "$session_name")" \
+                "$label marker change retained the raw marker"
+            assert_equal "$session_path" \
+                "$(raw_session_path_marker "$root" "$session_name")" \
+                "$label marker change did not use the same legacy path"
+            ;;
+        rename)
+            run_tmux "$root" rename-session -t "$old_id" "$renamed_session"
+            assert_equal "$old_id" \
+                "$(session_id "$root" "$renamed_session")" \
+                "$label rename replaced the selected session"
+            assert_equal "$old_marker" \
+                "$(raw_session_path_marker "$root" "$renamed_session")" \
+                "$label rename changed the raw marker"
+            ;;
+        *)
+            fail_test "$label has an unknown identity mutation"
+            ;;
+    esac
+    finish_m7_outside_identity_failure "$label" "$root" \
+        "$state_directory" "$snapshot_before" "$ack_file"
+    if [[ "$mutation" != "replace" ]]; then
+        assert_contains "$LAST_TRANSCRIPT" \
+            "session entry was not acknowledged: $label" \
+            "$label did not report its missing acknowledgment"
+    fi
+}
+
+function exercise_m7_inside_id_replacement {
+    local root="$1"
+    local home="$2"
+    local xdg_home="$3"
+    local state_directory="$4"
+    local source_session="m7-id-inside-source"
+    local target_session="m7-id-inside-target"
+    local session_path="$5"
+    local old_id=""
+    local new_id=""
+    local old_marker=""
+    local pending_file=""
+    local ack_file=""
+    local snapshot_before=""
+    local status=""
+    local acknowledgment_observed=0
+
+    create_legacy_marked_session "$root" "$source_session" "$session_path"
+    create_legacy_marked_session "$root" "$target_session" "$session_path"
+    run_outside_success m7-id-inside-seed "$root" "$home" "$xdg_home" \
+        "$RUNNER" "$target_session" attach "$target_session"
+    old_id=$(session_id "$root" "$target_session")
+    old_marker=$(raw_session_path_marker "$root" "$target_session")
+    snapshot_before=$(state_snapshot "$state_directory")
+
+    start_source_client m7-id-inside "$root" "$home" "$xdg_home" \
+        "$source_session"
+    invoke_runner_inside_entry_gated m7-id-inside "$root" "$home" \
+        "$xdg_home" "$source_session" "$RUNNER" attach "$target_session"
+    if ! wait_for_file "$ENTRY_GATE_READY" || \
+        ! wait_for_pending_file "$state_directory"; then
+        fail_test "inside ID replacement did not reach its entry barrier"
+    fi
+    pending_file="$LAST_PENDING_FILE"
+    ack_file=$(acknowledged_record_for_pending "$pending_file")
+    run_tmux "$root" kill-session -t "$old_id"
+    create_legacy_marked_session "$root" "$target_session" "$session_path"
+    new_id=$(session_id "$root" "$target_session")
+    assert_not_equal "$old_id" "$new_id" \
+        "inside replacement retained the selected session ID"
+    assert_equal "$old_marker" \
+        "$(raw_session_path_marker "$root" "$target_session")" \
+        "inside replacement changed the raw marker"
+
+    start_state_lock_holder m7-id-inside-ack "$state_directory"
+    release_entry_gate
+    if ! wait_for_file "$ENTRY_GATE_DONE"; then
+        stop_state_lock_holder m7-id-inside-ack
+        fail_test "inside ID replacement tmux call did not finish"
+    fi
+    if [[ -e "$ack_file" ]]; then
+        acknowledgment_observed=1
+    fi
+    stop_state_lock_holder m7-id-inside-ack
+    if (( acknowledgment_observed )); then
+        fail_test "inside ID replacement published an acknowledgment"
+    fi
+    if ! wait_for_file "$LAST_INSIDE_STATUS"; then
+        fail_test "inside ID replacement did not record runner status"
+    fi
+    status=$(inside_runner_status)
+    assert_not_equal "0" "$status" \
+        "inside ID replacement unexpectedly switched clients"
+    assert_equal "$source_session" "$(current_client_sessions "$root")" \
+        "inside ID replacement moved the existing client"
+    [[ ! -e "$ack_file" ]] || \
+        fail_test "inside ID replacement retained an acknowledgment"
+    if ! wait_for_no_state_transactions "$state_directory"; then
+        fail_test "inside ID replacement did not remove its transaction"
+    fi
+    assert_equal "$snapshot_before" "$(state_snapshot "$state_directory")" \
+        "inside ID replacement changed navigation state"
+    ENTRY_GATE_READY=""
+    ENTRY_GATE_RELEASE=""
+    ENTRY_GATE_DONE=""
+    detach_current_client
+    finish_current_pty
+    assert_last_pty_succeeded "inside ID replacement source client failed"
+}
+
+function exercise_m7_special_marker_positive {
+    local root="$1"
+    local home="$2"
+    local xdg_home="$3"
+    local state_directory="$4"
+    local source_session="m7-special-source"
+    local target_session="m7-special"
+    local status=""
+
+    start_entry_gated_runner_outside m7-special-outside "$root" "$home" \
+        "$xdg_home" "$RUNNER" if-shell attach "$target_session"
+    if ! wait_for_file "$ENTRY_GATE_READY" || \
+        ! wait_for_pending_file "$state_directory"; then
+        fail_test "special-marker outside entry did not reach its barrier"
+    fi
+    release_entry_gate
+    if ! wait_for_client_session "$root" "$target_session"; then
+        fail_test "special-marker outside entry did not attach"
+    fi
+    detach_current_client
+    finish_current_pty
+    ENTRY_GATE_READY=""
+    ENTRY_GATE_RELEASE=""
+    ENTRY_GATE_DONE=""
+    assert_last_pty_succeeded "special-marker outside entry failed"
+
+    start_source_client m7-special-inside "$root" "$home" "$xdg_home" \
+        "$source_session"
+    invoke_runner_inside_entry_gated m7-special-inside "$root" "$home" \
+        "$xdg_home" "$source_session" "$RUNNER" attach "$target_session"
+    if ! wait_for_file "$ENTRY_GATE_READY" || \
+        ! wait_for_pending_file "$state_directory"; then
+        fail_test "special-marker inside entry did not reach its barrier"
+    fi
+    release_entry_gate
+    if ! wait_for_client_session "$root" "$target_session" || \
+        ! wait_for_file "$LAST_INSIDE_STATUS"; then
+        fail_test "special-marker inside entry did not switch"
+    fi
+    status=$(inside_runner_status)
+    assert_equal "0" "$status" "special-marker inside entry failed"
+    ENTRY_GATE_READY=""
+    ENTRY_GATE_RELEASE=""
+    ENTRY_GATE_DONE=""
+    detach_current_client
+    finish_current_pty
+    assert_last_pty_succeeded "special-marker inside source client failed"
+    assert_no_state_transactions "$state_directory"
+}
+
+function exercise_m7_session_identity {
+    local root=""
+    local home="$WORKSPACE/m7-identity/home"
+    local xdg_home="$WORKSPACE/m7-identity/config"
+    local state_home="$WORKSPACE/m7-identity/state-home"
+    local state_directory=""
+    local special_path="$WORKSPACE/m7-identity/path-#,};'"
+    local replace_path="$WORKSPACE/m7-identity/replace-#,}"
+    local marker_path="$WORKSPACE/m7-identity/marker-#,}"
+    local rename_path="$WORKSPACE/m7-identity/rename-#,}"
+    local inside_path="$WORKSPACE/m7-identity/inside-#,}"
+    local unmarked_conflict_path="$WORKSPACE/m7-identity/unmarked-conflict"
+
+    create_tmux_root m7-identity
+    root="$NEW_TMUX_ROOT"
+    export XDG_STATE_HOME="$state_home"
+    state_directory=$(runner_state_directory_for "$state_home")
+    mkdir -p -- "$home" "$xdg_home" "$special_path" "$replace_path" \
+        "$marker_path" "$rename_path" "$inside_path" \
+        "$unmarked_conflict_path"
+
+    exercise_m7_unmarked_marker_normalization "$root" "$home" \
+        "$xdg_home" "$state_directory" "$unmarked_conflict_path"
+
+    create_legacy_marked_session "$root" m7-special "$special_path"
+    run_tmux "$root" new-session -d -s m7-special-source
+    exercise_m7_special_marker_positive "$root" "$home" "$xdg_home" \
+        "$state_directory"
+
+    exercise_m7_outside_identity_guard m7-id-replace "$root" "$home" \
+        "$xdg_home" "$state_directory" m7-id-replace "$replace_path" \
+        replace
+    exercise_m7_outside_identity_guard m7-marker-change "$root" "$home" \
+        "$xdg_home" "$state_directory" m7-marker-change "$marker_path" \
+        marker
+    exercise_m7_outside_identity_guard m7-name-change "$root" "$home" \
+        "$xdg_home" "$state_directory" m7-name-change "$rename_path" \
+        rename
+    exercise_m7_inside_id_replacement "$root" "$home" "$xdg_home" \
+        "$state_directory" "$inside_path"
+    assert_no_state_transactions "$state_directory"
+    unset XDG_STATE_HOME
+}
+
 function test_m7_t1_installation {
     local root=""
     local home="$WORKSPACE/m7-t1/home with space"
@@ -5266,6 +6648,17 @@ function test_m7_t1_installation {
     local preserved_config="$WORKSPACE/m7-t1/preserved-tmux.conf"
     local session_path="$WORKSPACE/m7-t1/session path"
     local state_directory="$home/.local/state/tmux-runner"
+    local ambient_repository="$WORKSPACE/m7-t1/ambient-repository"
+    local no_git_source="$WORKSPACE/m7-t1/no-git-source"
+    local unrelated_home="$WORKSPACE/m7-t1/unrelated-home"
+    local no_git_xdg="$WORKSPACE/m7-t1/no-git-config"
+    local no_git_runner="$unrelated_home/.local/bin/tmux-runner"
+    local no_git_version=""
+    local no_git_install_date=""
+    local no_git_install_epoch=0
+    local install_before=0
+    local install_after=0
+    local unrelated_hash=""
     local inventory=""
     local expected_inventory=""
     local socket_file=""
@@ -5274,8 +6667,10 @@ function test_m7_t1_installation {
     create_tmux_root m7-t1
     root="$NEW_TMUX_ROOT"
     mkdir -p -- "$home" "$xdg_home" "$session_path"
+    init_git_repository "$ambient_repository"
     assert_command_succeeds "M7-T1 make install failed" \
-        env XDG_CONFIG_HOME="$xdg_home" \
+        env GIT_DIR="$ambient_repository/.git" \
+        GIT_WORK_TREE="$ambient_repository" XDG_CONFIG_HOME="$xdg_home" \
         make -C "$REPO_ROOT" HOME="$home" install
 
     inventory=$(find "$home" "$xdg_home" \( -type f -o -type l \) \
@@ -5297,10 +6692,54 @@ function test_m7_t1_installation {
     printf '%s\n' 'set -g @tmux-runner-m7-config loaded' > "$installed_config"
     cp "$installed_config" "$preserved_config"
     assert_command_succeeds "M7-T1 second make install failed" \
-        env XDG_CONFIG_HOME="$xdg_home" \
+        env GIT_DIR="$ambient_repository/.git" \
+        GIT_WORK_TREE="$ambient_repository" XDG_CONFIG_HOME="$xdg_home" \
         make -C "$REPO_ROOT" HOME="$home" install
     assert_command_succeeds "M7-T1 second install changed local config" \
         cmp -s "$preserved_config" "$installed_config"
+
+    mkdir -p -- "$no_git_source" "$no_git_xdg"
+    cp -- "$REPO_ROOT/Makefile" "$no_git_source/Makefile"
+    cp -a -- "$REPO_ROOT/bin" "$REPO_ROOT/config" \
+        "$REPO_ROOT/configure" "$no_git_source/"
+    if git -C "$no_git_source" rev-parse --is-inside-work-tree \
+            >/dev/null 2>&1; then
+        fail_test "M7-T1 plain source copy unexpectedly has Git identity"
+    fi
+    init_git_repository "$unrelated_home"
+    unrelated_hash=$(git -C "$unrelated_home" rev-parse --short HEAD)
+    install_before=$(date -u '+%s')
+    assert_command_succeeds "M7-T1 no-Git source install failed" \
+        env GIT_DIR="$unrelated_home/.git" \
+        GIT_WORK_TREE="$unrelated_home" XDG_CONFIG_HOME="$no_git_xdg" \
+        make -C "$no_git_source" HOME="$unrelated_home" install
+    install_after=$(date -u '+%s')
+    no_git_version=$(cd -- "$unrelated_home" && \
+        "$no_git_runner" --version)
+    assert_equal "tmux-runner version 0.1.0 (unknown)" \
+        "${no_git_version%%$'\n'*}" \
+        "M7-T1 no-Git installation adopted another repository"
+    assert_equal "unknown" \
+        "$(printf '%s\n' "$no_git_version" | \
+            sed -n 's/^commit date:  //p')" \
+        "M7-T1 no-Git installation reported a commit date"
+    no_git_install_date=$(printf '%s\n' "$no_git_version" | \
+        sed -n 's/^install date: //p')
+    if [[ ! "$no_git_install_date" =~ \
+        ^[0-9]{4}-[0-9]{2}-[0-9]{2}T[0-9]{2}:[0-9]{2}:[0-9]{2}Z$ ]]; then
+        fail_test "M7-T1 no-Git installation date is not UTC"
+    fi
+    if ! no_git_install_epoch=$(date -u -d "$no_git_install_date" '+%s'); then
+        fail_test "M7-T1 no-Git installation date is not parseable UTC"
+    fi
+    if (( no_git_install_epoch < install_before || \
+        no_git_install_epoch > install_after )); then
+        fail_test "M7-T1 no-Git installation date is outside its interval"
+    fi
+    assert_not_contains "$no_git_version" "(live)" \
+        "M7-T1 no-Git installation used live metadata"
+    assert_not_contains "$no_git_version" "$unrelated_hash" \
+        "M7-T1 no-Git installation used its HOME repository identity"
 
     socket_file=$(find "$root" -type s -print -quit)
     assert_equal "" "$socket_file" \
@@ -5411,8 +6850,7 @@ function test_m7_t2_interface_bundle {
 
     run_outside_success m7-t2-attach-terminator "$root" "$home" \
         "$xdg_home" "$RUNNER" m7-interface attach -- m7-interface
-    assert_contains "$LAST_TRANSCRIPT" \
-        "$TMUX_RUNNER_TRACE_PREFIX attach-session -t =m7-interface" \
+    assert_session_entry_trace "$LAST_TRANSCRIPT" "$root" m7-interface \
         "M7-T2 valid attach -- did not use the exact session target"
     pass_test M7-T2 "$TEST_VARIANT help, completion, README, and attach --"
 }
@@ -5494,12 +6932,15 @@ function run_complete_child {
     local runner="$2"
     local completion="$3"
     local manifest="$4"
+    local ambient_repository="$5"
     local script_path="$TEST_DIR/test-tmux-runner.bash"
     local child_workspace=""
     local child_rc=0
 
     : > "$manifest"
-    env TMUX_RUNNER_TEST_CHILD=1 \
+    env GIT_DIR="$ambient_repository/.git" \
+        GIT_WORK_TREE="$ambient_repository" TMUX_RUNNER_TEST_CHILD=1 \
+        TMUX_RUNNER_TEST_EXPECTED_AMBIENT_REPOSITORY="$ambient_repository" \
         TMUX_RUNNER_TEST_MANIFEST="$manifest" \
         TMUX_RUNNER_TEST_VARIANT="$variant" \
         TMUX_RUNNER_TEST_RUNNER="$runner" \
@@ -5688,22 +7129,27 @@ function inspect_observation_after_cleanup {
 
 function run_observation_supervisor {
     local supervisor_workspace="$1"
+    local variant="$2"
+    local runner="$3"
+    local ambient_repository="$4"
     local script_path="$TEST_DIR/test-tmux-runner.bash"
-    local manifest="$supervisor_workspace/observation.manifest"
-    local pre_ready="$supervisor_workspace/observation.pre-ready"
-    local start_release="$supervisor_workspace/observation.start-release"
-    local live_ready="$supervisor_workspace/observation.live-ready"
-    local finish_release="$supervisor_workspace/observation.finish-release"
-    local cleanup_done="$supervisor_workspace/observation.cleanup-done"
+    local manifest="$supervisor_workspace/$variant-observation.manifest"
+    local pre_ready="$supervisor_workspace/$variant-observation.pre-ready"
+    local start_release="$supervisor_workspace/$variant-observation.start-release"
+    local live_ready="$supervisor_workspace/$variant-observation.live-ready"
+    local finish_release="$supervisor_workspace/$variant-observation.finish-release"
+    local cleanup_done="$supervisor_workspace/$variant-observation.cleanup-done"
     local child_pid=""
     local child_rc=0
 
     : > "$manifest"
-    env TMUX_RUNNER_TEST_CHILD=1 TMUX_RUNNER_TEST_OBSERVATION=1 \
+    env GIT_DIR="$ambient_repository/.git" \
+        GIT_WORK_TREE="$ambient_repository" TMUX_RUNNER_TEST_CHILD=1 \
+        TMUX_RUNNER_TEST_OBSERVATION=1 \
+        TMUX_RUNNER_TEST_EXPECTED_AMBIENT_REPOSITORY="$ambient_repository" \
         TMUX_RUNNER_TEST_MANIFEST="$manifest" \
-        TMUX_RUNNER_TEST_VARIANT=source \
-        TMUX_RUNNER_TEST_RUNNER="$SOURCE_RUNNER" \
-        TMUX_RUNNER_TEST_COMPLETION="$SOURCE_COMPLETION" \
+        TMUX_RUNNER_TEST_VARIANT="$variant" \
+        TMUX_RUNNER_TEST_RUNNER="$runner" \
         TMUX_RUNNER_TEST_PRE_READY="$pre_ready" \
         TMUX_RUNNER_TEST_START_RELEASE="$start_release" \
         TMUX_RUNNER_TEST_LIVE_READY="$live_ready" \
@@ -5713,7 +7159,8 @@ function run_observation_supervisor {
     child_pid=$!
 
     if ! wait_for_supervisor_file "$pre_ready"; then
-        printf 'Observation probe pre-release readiness timed out.\n' >&2
+        printf '%s observation pre-release readiness timed out.\n' \
+            "$variant" >&2
         stop_observation_child "$child_pid" "$start_release" \
             "$finish_release" "$cleanup_done"
         return 1
@@ -5725,7 +7172,7 @@ function run_observation_supervisor {
     fi
     printf 'release\n' > "$start_release"
     if ! wait_for_supervisor_file "$live_ready"; then
-        printf 'Observation probe live readiness timed out.\n' >&2
+        printf '%s observation live readiness timed out.\n' "$variant" >&2
         stop_observation_child "$child_pid" "$start_release" \
             "$finish_release" "$cleanup_done"
         return 1
@@ -5737,17 +7184,91 @@ function run_observation_supervisor {
     fi
     printf 'release\n' > "$finish_release"
     if ! wait_for_supervisor_file "$cleanup_done"; then
-        printf 'Observation probe cleanup timed out.\n' >&2
+        printf '%s observation cleanup timed out.\n' "$variant" >&2
         stop_observation_child "$child_pid" "$start_release" \
             "$finish_release" "$cleanup_done"
         return 1
     fi
     wait "$child_pid" || child_rc=$?
     if (( child_rc != 0 )); then
-        printf 'Observation probe failed with exit %d.\n' "$child_rc" >&2
+        printf '%s observation failed with exit %d.\n' \
+            "$variant" "$child_rc" >&2
         return 1
     fi
     inspect_observation_after_cleanup "$manifest"
+}
+
+function run_forced_cleanup_supervisor {
+    local supervisor_workspace="$1"
+    local variant="$2"
+    local runner="$3"
+    local ambient_repository="$4"
+    local script_path="$TEST_DIR/test-tmux-runner.bash"
+    local failure_manifest="$supervisor_workspace/$variant-failure.manifest"
+    local failure_output="$supervisor_workspace/$variant-failure.output"
+    local failure_workspace=""
+    local failure_state_directory=""
+    local failure_state_file=""
+    local failure_debris=""
+    local socket_file=""
+    local probe_rc=0
+
+    env GIT_DIR="$ambient_repository/.git" \
+        GIT_WORK_TREE="$ambient_repository" TMUX_RUNNER_TEST_CHILD=1 \
+        TMUX_RUNNER_TEST_FORCE_FAILURE=1 \
+        TMUX_RUNNER_TEST_EXPECTED_AMBIENT_REPOSITORY="$ambient_repository" \
+        TMUX_RUNNER_TEST_VARIANT="$variant" \
+        TMUX_RUNNER_TEST_RUNNER="$runner" \
+        TMUX_RUNNER_TEST_MANIFEST="$failure_manifest" \
+        bash "$script_path" > "$failure_output" 2>&1 || probe_rc=$?
+    if (( probe_rc == 0 )); then
+        printf '%s forced cleanup probe unexpectedly succeeded.\n' \
+            "$variant" >&2
+        return 1
+    fi
+    failure_workspace=$(manifest_workspace "$failure_manifest")
+    if [[ -z "$failure_workspace" ]] || [[ ! -d "$failure_workspace" ]]; then
+        printf '%s forced failure did not preserve its workspace.\n' \
+            "$variant" >&2
+        return 1
+    fi
+    if ! grep -F -- "Diagnostic workspace: $failure_workspace" \
+        "$failure_output" >/dev/null; then
+        printf '%s forced failure did not report its workspace.\n' \
+            "$variant" >&2
+        return 1
+    fi
+    if ! assert_manifest_processes_stopped "$failure_manifest"; then
+        return 1
+    fi
+    failure_state_directory=$(manifest_value "$failure_manifest" state)
+    failure_state_file="$failure_state_directory/state"
+    if [[ ! -s "$failure_state_file" ]] || \
+        ! validate_main_state_record "$failure_state_file"; then
+        printf '%s forced failure did not preserve valid state.\n' \
+            "$variant" >&2
+        return 1
+    fi
+    failure_debris=$(state_transaction_debris "$failure_state_directory")
+    if [[ -n "$failure_debris" ]]; then
+        printf '%s forced failure left transaction debris:\n%s\n' \
+            "$variant" "$failure_debris" >&2
+        return 1
+    fi
+    if ! directory_lock_available "$failure_state_directory"; then
+        printf '%s forced failure did not release the state directory lock.\n' \
+            "$variant" >&2
+        return 1
+    fi
+    socket_file=$(find "$failure_workspace" -type s -print -quit)
+    if [[ -n "$socket_file" ]]; then
+        printf '%s forced failure left a socket: %s\n' \
+            "$variant" "$socket_file" >&2
+        return 1
+    fi
+
+    chmod -R u+w -- "$failure_workspace"
+    rm -rf -- "$failure_workspace"
 }
 
 function run_forced_cleanup_probe {
@@ -5849,109 +7370,66 @@ function run_observation_probe {
 }
 
 function run_supervisor {
-    local script_path="$TEST_DIR/test-tmux-runner.bash"
     local supervisor_workspace=""
     local source_manifest=""
     local installed_manifest=""
-    local failure_manifest=""
-    local failure_output=""
-    local failure_workspace=""
-    local failure_state_directory=""
-    local failure_state_file=""
-    local failure_debris=""
     local install_home=""
     local install_config_home=""
     local installed_runner=""
     local installed_completion=""
-    local socket_file=""
-    local probe_rc=0
+    local ambient_repository=""
 
     supervisor_workspace=$(mktemp -d /tmp/tmux-runner-supervisor.XXXXXX)
     source_manifest="$supervisor_workspace/source.manifest"
     installed_manifest="$supervisor_workspace/installed.manifest"
-    failure_manifest="$supervisor_workspace/failure.manifest"
-    failure_output="$supervisor_workspace/failure.output"
     install_home="$supervisor_workspace/installed home"
     install_config_home="$supervisor_workspace/installed config"
     installed_runner="$install_home/.local/bin/tmux-runner"
     installed_completion="$install_home/.local/share/bash-completion/completions/tmux-runner"
+    ambient_repository="$supervisor_workspace/ambient-repository"
+    init_git_repository "$ambient_repository"
 
     if ! run_complete_child source "$SOURCE_RUNNER" "$SOURCE_COMPLETION" \
-        "$source_manifest"; then
+        "$source_manifest" "$ambient_repository"; then
         remove_supervisor_control_files "$supervisor_workspace"
         return 1
     fi
-    if ! env XDG_CONFIG_HOME="$install_config_home" \
+    if ! env GIT_DIR="$ambient_repository/.git" \
+        GIT_WORK_TREE="$ambient_repository" \
+        XDG_CONFIG_HOME="$install_config_home" \
         make -C "$REPO_ROOT" HOME="$install_home" install; then
         printf 'Supervisor make install failed.\n' >&2
         remove_supervisor_control_files "$supervisor_workspace"
         return 1
     fi
     if ! run_complete_child installed "$installed_runner" \
-        "$installed_completion" "$installed_manifest"; then
+        "$installed_completion" "$installed_manifest" \
+        "$ambient_repository"; then
         remove_supervisor_control_files "$supervisor_workspace"
         return 1
     fi
     printf 'PASS M7-T3: complete source and installed integration suites\n'
 
-    if ! run_observation_supervisor "$supervisor_workspace"; then
+    if ! run_observation_supervisor "$supervisor_workspace" source \
+        "$SOURCE_RUNNER" "$ambient_repository"; then
         remove_supervisor_control_files "$supervisor_workspace"
         return 1
     fi
-
-    TMUX_RUNNER_TEST_CHILD=1 TMUX_RUNNER_TEST_FORCE_FAILURE=1 \
-        TMUX_RUNNER_TEST_MANIFEST="$failure_manifest" \
-        bash "$script_path" > "$failure_output" 2>&1 || probe_rc=$?
-    if (( probe_rc == 0 )); then
-        printf 'Forced cleanup probe unexpectedly succeeded.\n' >&2
+    if ! run_observation_supervisor "$supervisor_workspace" installed \
+        "$installed_runner" "$ambient_repository"; then
         remove_supervisor_control_files "$supervisor_workspace"
         return 1
     fi
-    failure_workspace=$(manifest_workspace "$failure_manifest")
-    if [[ -z "$failure_workspace" ]] || [[ ! -d "$failure_workspace" ]]; then
-        printf 'Forced failure did not preserve its workspace.\n' >&2
+    if ! run_forced_cleanup_supervisor "$supervisor_workspace" source \
+        "$SOURCE_RUNNER" "$ambient_repository"; then
         remove_supervisor_control_files "$supervisor_workspace"
         return 1
     fi
-    if ! grep -F -- "Diagnostic workspace: $failure_workspace" \
-        "$failure_output" >/dev/null; then
-        printf 'Forced failure did not report its workspace.\n' >&2
+    if ! run_forced_cleanup_supervisor "$supervisor_workspace" installed \
+        "$installed_runner" "$ambient_repository"; then
         remove_supervisor_control_files "$supervisor_workspace"
         return 1
     fi
-    if ! assert_manifest_processes_stopped "$failure_manifest"; then
-        remove_supervisor_control_files "$supervisor_workspace"
-        return 1
-    fi
-    failure_state_directory=$(manifest_value "$failure_manifest" state)
-    failure_state_file="$failure_state_directory/state"
-    if [[ ! -s "$failure_state_file" ]] || \
-        ! validate_main_state_record "$failure_state_file"; then
-        printf 'Forced failure did not preserve valid state.\n' >&2
-        remove_supervisor_control_files "$supervisor_workspace"
-        return 1
-    fi
-    failure_debris=$(state_transaction_debris "$failure_state_directory")
-    if [[ -n "$failure_debris" ]]; then
-        printf 'Forced failure left transaction debris:\n%s\n' \
-            "$failure_debris" >&2
-        remove_supervisor_control_files "$supervisor_workspace"
-        return 1
-    fi
-    if ! directory_lock_available "$failure_state_directory"; then
-        printf 'Forced failure did not release the state directory lock.\n' >&2
-        remove_supervisor_control_files "$supervisor_workspace"
-        return 1
-    fi
-    socket_file=$(find "$failure_workspace" -type s -print -quit)
-    if [[ -n "$socket_file" ]]; then
-        printf 'Forced failure left a socket: %s\n' "$socket_file" >&2
-        remove_supervisor_control_files "$supervisor_workspace"
-        return 1
-    fi
-
-    chmod -R u+w -- "$failure_workspace"
-    rm -rf -- "$failure_workspace"
     remove_supervisor_control_files "$supervisor_workspace"
     printf 'PASS M3-T5: outer supervisor cleanup and failure retention\n'
     printf 'PASS M7-T4: live isolation, cleanup, and failure evidence\n'
@@ -5993,10 +7471,12 @@ function main {
     test_m6_t5_interface_regression
     test_m7_t1_installation
     test_m7_t2_interface_bundle
+    exercise_m7_session_identity
     printf 'PASS: %d milestone checks completed (%s)\n' \
         "$TESTS_PASSED" "$TEST_VARIANT"
 }
 
+require_test_process_git_boundary
 if [[ "${TMUX_RUNNER_TEST_CHILD:-}" == "1" ]]; then
     if [[ "${TMUX_RUNNER_TEST_FORCE_FAILURE:-}" == "1" ]]; then
         run_forced_cleanup_probe
