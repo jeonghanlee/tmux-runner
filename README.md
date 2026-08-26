@@ -3,6 +3,38 @@
 `tmux-runner` is a local Bash front end for repository-oriented tmux
 sessions. It creates, lists, and enters sessions on a dedicated tmux server.
 
+## Quick Start
+
+The shortest supported path requires Bash 4 or later, tmux, Git, and GNU Make.
+See [Requirements](#requirements) for the complete command list.
+
+From the repository root, install the runner for the current user, make it
+available in the current Bash session, and load completion:
+
+```bash
+make install
+export PATH="$HOME/.local/bin:$PATH"
+source "$HOME/.local/share/bash-completion/completions/tmux-runner"
+```
+
+Create or reuse a session for a repository and enter it immediately:
+
+```bash
+tmux-runner create -c /path/to/repository
+```
+
+With the starter configuration, detach by pressing `Ctrl-b`, releasing the
+keys, and then pressing `d`. List the dedicated runner sessions and select one
+to enter again:
+
+```bash
+tmux-runner ls
+```
+
+The commands above configure only the current shell. See
+[Installation](#installation) to make `PATH` and Bash completion available in
+future shells.
+
 ## Architecture
 
 Every tmux operation uses `tmux -L tmux-runner`. The resulting Unix domain
@@ -389,15 +421,37 @@ Register the installed completion in the current Bash session:
 source ~/.local/share/bash-completion/completions/tmux-runner
 ```
 
+To make both settings available in future Bash sessions without depending on
+system Bash completion setup, add these lines once to `~/.bashrc`:
+
+```bash
+export PATH="$HOME/.local/bin:$PATH"
+if [[ -r "$HOME/.local/share/bash-completion/completions/tmux-runner" ]]; then
+    source "$HOME/.local/share/bash-completion/completions/tmux-runner"
+fi
+```
+
+Open a new Bash session, or reload that file in the current session, then
+verify both registrations:
+
+```bash
+source ~/.bashrc
+command -v tmux-runner
+complete -p tmux-runner
+```
+
 Installation does not create or replace the local `repos` catalog. From an
-existing Git working tree, create it with that repository as the first search
-root. Replace `repository_root` with another existing absolute directory when
-a broader catalog is wanted:
+existing Git working tree, append that repository as a search root. Repeating
+the example may add the same line again, but discovery resolves and
+deduplicates configured roots before presenting the catalog. Set
+`repository_root` to another existing absolute directory when a broader search
+root is wanted:
 
 ```bash
 repository_root=$(git rev-parse --show-toplevel)
-mkdir -p "${XDG_CONFIG_HOME:-$HOME/.config}/tmux-runner"
-printf '%s\n' "$repository_root" > "${XDG_CONFIG_HOME:-$HOME/.config}/tmux-runner/repos"
+config_directory="${XDG_CONFIG_HOME:-$HOME/.config}/tmux-runner"
+mkdir -p "$config_directory"
+printf '%s\n' "$repository_root" >> "$config_directory/repos"
 tmux-runner repo
 ```
 
@@ -409,6 +463,59 @@ A different test home and its config path can be supplied with
 `make HOME="/path/to/home" XDG_CONFIG_HOME="/path/to/home/.config" install`.
 Inspect the same action without writing files with
 `make -n HOME="/path/to/home" XDG_CONFIG_HOME="/path/to/home/.config" install`.
+
+## Updating
+
+After updating the source checkout, run the installer again from the repository
+root:
+
+```bash
+make install
+tmux-runner --version
+```
+
+Reinstallation replaces the executable and completion file. It preserves an
+existing local `tmux.conf`.
+
+## Local Configuration
+
+Edit the runner-only configuration at
+`${XDG_CONFIG_HOME:-$HOME/.config}/tmux-runner/tmux.conf`. If the dedicated
+server is running, apply changes without ending its sessions:
+
+```bash
+tmux -L tmux-runner source-file "${XDG_CONFIG_HOME:-$HOME/.config}/tmux-runner/tmux.conf"
+```
+
+Some settings are meaningful only when the dedicated server starts. To apply
+those settings from a fresh server, first detach every runner client and save
+or finish all work in its sessions. The following command ends every session
+on the dedicated runner server:
+
+```bash
+tmux -L tmux-runner kill-server
+```
+
+The next `tmux-runner create`, `repo`, `recent`, `last`, `ls`, or `attach`
+command starts the dedicated server with the local configuration.
+
+## Removal
+
+Remove the installed executable and completion file while preserving local
+configuration and navigation state:
+
+```bash
+rm -f "$HOME/.local/bin/tmux-runner"
+rm -f "$HOME/.local/share/bash-completion/completions/tmux-runner"
+```
+
+Remove the completion setup block from `~/.bashrc` if it was added during
+installation. Remove the `PATH` line only if it was added solely for
+`tmux-runner` and no other local executable needs it. Local configuration
+remains under
+`${XDG_CONFIG_HOME:-$HOME/.config}/tmux-runner`, and navigation state remains
+under `${XDG_STATE_HOME:-$HOME/.local/state}/tmux-runner`; remove those
+directories separately only when their contents are no longer needed.
 
 ## First Use
 
