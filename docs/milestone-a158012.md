@@ -17,10 +17,9 @@ Canonical branch or ref: master
 Git upstream: origin/master
 Remote tracker: none
 
-Next session entry point: run separately authorized M7 / T1-T4 runtime
-verification against the reviewed follow-up correction, then record the
-carrying commit and run M7 / T5. Tag and GitHub release execution remain
-separate operations.
+Next session entry point: obtain separate commit authority, record the carrying
+commit, and run M7 / T5. Tag and GitHub release execution remain separate
+operations.
 
 ## Milestone
 
@@ -34,7 +33,7 @@ separate operations.
 | Identity | M4 | Resolve repository and working-directory identity | Milestone | Complete | No | M3, D16 | Complete 2026-08-24, carrying commit `8caaea1`; M4 / T1-T5 and both requested reviews accepted; [detail](#m4---resolve-repository-and-working-directory-identity) |
 | Discovery | M5 | Discover configured repositories and select one | Milestone | Complete | No | M4, D15, D17 | Complete 2026-08-24, carrying commit `71ce91f`; M5 / T1-T5 and both requested reviews accepted; [detail](#m5---discover-configured-repositories-and-select-one) |
 | Navigation | M6 | Add recent and previous-session navigation | Milestone | Complete | No | M5, D18 | Complete 2026-08-24, carrying commit `1a46fca`; M6 / T1-T5 and both requested reviews accepted; [detail](#m6---add-recent-and-previous-session-navigation) |
-| Integration | M7 | Complete integrated verification and release preparation | Milestone | In progress | No | M3, M4, M5, M6, D17, D19, D20, D21, D22, D23, D24, D25, D26, D27, D28 | Follow-up implementation, authorized static checks, and both final static reviews completed 2026-08-25; M7 / T1-T5 remain Pending; prior commit `ae23625` remains historical verification evidence; [detail](#m7---complete-integrated-verification-and-release-preparation) |
+| Integration | M7 | Complete integrated verification and release preparation | Milestone | In progress | No | M3, M4, M5, M6, D17, D19, D20, D21, D22, D23, D24, D25, D26, D27, D28 | Follow-up implementation and M7 / T1-T4 runtime verification completed 2026-08-25 through source and fresh installed copies; M7 / T5 and the carrying commit remain pending; prior commit `ae23625` remains historical verification evidence; [detail](#m7---complete-integrated-verification-and-release-preparation) |
 
 Milestone tally: Complete 6, In progress 1, Not started 0.
 
@@ -1047,10 +1046,15 @@ preserved below.
   within the authorized static scope.
 - On 2026-08-25, the final static third-person and second-person reviews
   accepted the frozen files with no remaining finding.
-- No runner command, tmux server, session, or query operation, integration
-  fixture, or complete shipped suite has been executed for this follow-up
-  correction. A version-only `tmux -V` invocation created no server or session
-  and provides no M7 runtime evidence.
+- On 2026-08-25, the source and fresh installed complete suites each passed 30
+  milestone checks through the shipped runner and fixtures. The outer
+  supervisor also passed live server, client, pane, socket, process, workspace,
+  lock, state-file, cleanup, and forced-failure observation for both copies.
+- On 2026-08-25, a new third-person review accepted the two runtime-found
+  corrections after independent syntax, ShellCheck, diff, pattern, assertion,
+  source, installed, and outer-supervisor checks passed.
+- On 2026-08-25, the final second-person reader pass accepted the canonical
+  next action, M7 / T1-T4 evidence, and clean-candidate condition for M7 / T5.
 
 ##### Accepted Reopened Correction Plan
 
@@ -1131,10 +1135,10 @@ Superseded Plan Artifacts: none
 
 | Label | Observed At | Environment | Result | Evidence |
 | --- | --- | --- | --- | --- |
-| T1 | Not run | Reopened correction candidate | Pending | Installation verification requires separate runtime authorization. |
-| T2 | Not run | Reopened correction candidate | Pending | Interface and README verification requires separate runtime authorization. |
-| T3 | Not run | Reopened correction candidate | Pending | The source and installed shipped suites have not run for this correction. |
-| T4 | Not run | Reopened correction candidate | Pending | Source and installed observation and forced-failure paths have not run for this correction. |
+| T1 | 2026-08-25 17:28 PDT | GNU Make, temporary spaced `HOME` and XDG paths, source and ambient Git repositories, a no-Git source copy, and fresh source and installed runners | Pass | Both complete suite passes reported `PASS M7-T1`; file inventory, modes, config preservation, cold startup, explicit-source metadata, and stamped `unknown` installation behavior ran through the shipped installation and injector paths. |
+| T2 | 2026-08-25 17:28 PDT | Source and fresh installed runner, completion, README, temporary homes, real dedicated tmux servers, and PTYs | Pass | Both complete suite passes reported `PASS M7-T2`; help, version, completion, documented installation and first-use behavior, navigation, migration, transient session-ID entry, and `attach --` ran through the shipped paths. |
+| T3 | 2026-08-25 17:28 PDT | Source tree and fresh installed copy, real dedicated and default tmux servers, Git repositories and linked worktrees, PTYs, FIFOs, XDG paths, controlled concurrency, and bounded timeouts | Pass | The source and installed runs each reported 30 passed milestone checks, followed by `PASS M7-T3`; all M1-M7 and reopened-correction contracts ran through the shipped runner and fixtures. |
+| T4 | 2026-08-25 17:28 PDT | Outer process supervisor, real tmux queries, Linux process and filesystem inspection, and normal and forced-failure child runs for source and installed copies | Pass | The supervisor reported `PASS M3-T5` and `PASS M7-T4`; live isolation was observed and test-owned servers, clients, panes, sockets, processes, workspaces, locks, state files, and transaction files met the normal-cleanup and diagnostic-retention contracts. |
 | T5 | Not run | Reopened correction candidate | Pending | Release preparation requires a reviewed, committed, clean candidate. |
 
 ##### Prior Candidate Verification Results
@@ -1151,8 +1155,9 @@ Superseded Plan Artifacts: none
 
 - Prior-correction independent static review acceptance remains historical
   evidence. The follow-up final static third-person and second-person reviews
-  accepted the correction with no remaining finding. Runtime verification, a
-  carrying commit record, and final closure remain pending.
+  accepted the pre-runtime correction with no remaining finding. M7 / T1-T4
+  and both new reviews now pass; a carrying commit record, M7 / T5, and final
+  closure remain pending.
 
 ##### Prior Candidate Closure Evidence
 

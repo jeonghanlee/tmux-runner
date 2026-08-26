@@ -1785,8 +1785,9 @@ function resolve_session_target {
     SESSION_TARGET_NAME="$session_name"
     if load_session_path_option_target "${session_id}:"; then
         return 0
+    else
+        marker_rc=$?
     fi
-    marker_rc=$?
     if (( marker_rc == 1 )); then
         if ! run_tmux_command set-option -oq -t "${session_id}:" \
                 @tmux-runner-path "$SESSION_PATH_UNMARKED_MARKER"; then
@@ -1795,8 +1796,9 @@ function resolve_session_target {
         fi
         if load_session_path_option_target "${session_id}:"; then
             return 0
+        else
+            marker_rc=$?
         fi
-        marker_rc=$?
         if (( marker_rc == 1 )); then
             fail "session is no longer available before attachment: $session_name"
             return 1

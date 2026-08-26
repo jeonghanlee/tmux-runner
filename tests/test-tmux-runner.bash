@@ -278,6 +278,16 @@ function assert_not_contains {
     fi
 }
 
+function assert_text_not_contains {
+    local value="$1"
+    local text="$2"
+    local message="$3"
+
+    if [[ "$value" == *"$text"* ]]; then
+        fail_test "$message"
+    fi
+}
+
 function assert_command_succeeds {
     local message="$1"
 
@@ -387,7 +397,7 @@ function entry_hook_name_from_trace {
     local trace_line=""
 
     while IFS= read -r trace_line || [[ -n "$trace_line" ]]; do
-        if [[ "$trace_line" =~ (@tmux-runner-entry-[A-Za-z0-9_-]+) ]]; then
+        if [[ "$trace_line" =~ SESSION_ENTRY_HOOK_NAME=(@tmux-runner-entry-[A-Za-z0-9_-]+) ]]; then
             printf '%s\n' "${BASH_REMATCH[1]}"
             return 0
         fi
@@ -397,11 +407,18 @@ function entry_hook_name_from_trace {
 
 function entry_transaction_id_from_trace {
     local trace_file="$1"
+    local hook_name=""
     local trace_line=""
+    local transaction_id=""
+
+    if ! hook_name=$(entry_hook_name_from_trace "$trace_file"); then
+        return 1
+    fi
+    transaction_id="${hook_name#"$SESSION_ENTRY_HOOK_PREFIX"}"
 
     while IFS= read -r trace_line || [[ -n "$trace_line" ]]; do
-        if [[ "$trace_line" =~ STATE_TRANSACTION_ID=([A-Za-z0-9_-]+) ]]; then
-            printf '%s\n' "${BASH_REMATCH[1]}"
+        if [[ "$trace_line" == *"STATE_TRANSACTION_ID=$transaction_id"* ]]; then
+            printf '%s\n' "$transaction_id"
             return 0
         fi
     done < "$trace_file"
@@ -6736,9 +6753,9 @@ function test_m7_t1_installation {
         no_git_install_epoch > install_after )); then
         fail_test "M7-T1 no-Git installation date is outside its interval"
     fi
-    assert_not_contains "$no_git_version" "(live)" \
+    assert_text_not_contains "$no_git_version" "(live)" \
         "M7-T1 no-Git installation used live metadata"
-    assert_not_contains "$no_git_version" "$unrelated_hash" \
+    assert_text_not_contains "$no_git_version" "$unrelated_hash" \
         "M7-T1 no-Git installation used its HOME repository identity"
 
     socket_file=$(find "$root" -type s -print -quit)
