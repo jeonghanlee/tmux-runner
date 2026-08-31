@@ -496,8 +496,12 @@ on the dedicated runner server:
 tmux -L tmux-runner kill-server
 ```
 
-The next `tmux-runner create`, `repo`, `recent`, `last`, `ls`, or `attach`
-command starts the dedicated server with the local configuration.
+After the dedicated server is stopped, the next operation that creates a
+session loads the local configuration. `create` or `c` does this for a valid
+folder. A completed `repo` or `recent` selection does the same when it creates
+the selected path-matched session. `last`, `ls`, `attach`, and `a` only enter
+sessions that already exist; they do not recreate sessions ended by
+`kill-server`.
 
 ## Removal
 
