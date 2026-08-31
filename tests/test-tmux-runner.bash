@@ -662,6 +662,8 @@ function init_git_repository {
 
     mkdir -p -- "$repository"
     git -C "$repository" init -q
+    # Test fixtures must not inherit repository hooks from Git templates.
+    git -C "$repository" config core.hooksPath /dev/null
     git -C "$repository" config user.name "tmux-runner test"
     git -C "$repository" config user.email "tmux-runner@example.invalid"
     printf 'fixture\n' > "$repository/fixture.txt"
@@ -3997,9 +3999,9 @@ function test_t9_version {
     # data, which distinguishes a content diff from an index-only verdict.
     cp "$SOURCE_RUNNER" "$seed_runner"
     git -C "$fixture_seed" init -q
+    git -C "$fixture_seed" config core.hooksPath /dev/null
     git -C "$fixture_seed" add bin/tmux-runner
-    git -C "$fixture_seed" -c core.hooksPath=/dev/null \
-        -c user.name=tmux-runner-test \
+    git -C "$fixture_seed" -c user.name=tmux-runner-test \
         -c user.email=tmux-runner-test@example.invalid \
         commit -qm "Create version fixture"
     fixture_hash=$(git -C "$fixture_seed" rev-parse --short HEAD)
@@ -4738,6 +4740,7 @@ function test_m5_t2_repository_discovery {
     init_git_repository "$source_repo"
     git -C "$source_repo" worktree add -q -b linked-catalog "$linked_repo"
     git init -q --bare "$bare_repo"
+    git -C "$bare_repo" config core.hooksPath /dev/null
     init_git_repository "$shared_one"
     init_git_repository "$shared_two"
     init_git_repository "$norm_one"
@@ -5233,6 +5236,7 @@ function test_m6_t1_recent_navigation {
     mv -- "$repository_git_backup" "$repository_b/.git"
 
     git -C "$path_a" init -q
+    git -C "$path_a" config core.hooksPath /dev/null
     start_runner_outside m6-t1-recent-plain-to-git "$root" "$home" \
         "$xdg_home" "$RUNNER" recent
     if ! wait_for_transcript_text "Select recent destination:"; then
