@@ -28,6 +28,7 @@ readonly COMPLETION
 TEST_VARIANT=${TMUX_RUNNER_TEST_VARIANT:-source}
 readonly TEST_VARIANT
 readonly VERSION_INJECTOR="$REPO_ROOT/configure/inject-runner-version.bash"
+readonly CONFIG_INSTALLER="$REPO_ROOT/configure/install-runner-config.bash"
 readonly README="$REPO_ROOT/README.md"
 readonly RUNNER_CONFIG="$REPO_ROOT/config/tmux.conf"
 readonly RUNNER_SERVER_NAME="tmux-runner"
@@ -3093,6 +3094,8 @@ function test_t1_static {
     assert_command_succeeds "completion Bash syntax failed" bash -n "$COMPLETION"
     assert_command_succeeds "version injector Bash syntax failed" \
         bash -n "$VERSION_INJECTOR"
+    assert_command_succeeds "config installer Bash syntax failed" \
+        bash -n "$CONFIG_INSTALLER"
     assert_command_succeeds "test Bash syntax failed" bash -n "$TEST_DIR/test-tmux-runner.bash"
     assert_command_succeeds "runner ShellCheck reported a finding" \
         shellcheck "$RUNNER"
@@ -3100,6 +3103,8 @@ function test_t1_static {
         shellcheck -s bash "$COMPLETION"
     assert_command_succeeds "version injector ShellCheck reported a finding" \
         shellcheck "$VERSION_INJECTOR"
+    assert_command_succeeds "config installer ShellCheck reported a finding" \
+        shellcheck "$CONFIG_INSTALLER"
     assert_command_succeeds "test ShellCheck reported a finding" \
         shellcheck "$TEST_DIR/test-tmux-runner.bash"
     pass_test T1 "Bash syntax and ShellCheck"
@@ -3630,6 +3635,8 @@ function test_t6_install {
     local install_before=0
     local install_after=0
     local preserved_config=""
+    local prompt_output=""
+    local symlink_target=""
 
     create_tmux_root t6
     root="$NEW_TMUX_ROOT"
@@ -3718,8 +3725,44 @@ function test_t6_install {
         install-target \
         "$TMUX_PATH -L $RUNNER_SERVER_NAME -f '$installed_config'" \
         "installed runner did not use the exact target"
+
+    prompt_output="$WORKSPACE/t6/config-prompt.output"
+    if ! printf '%s\n' n | env XDG_CONFIG_HOME="$xdg_home" \
+            make -C "$REPO_ROOT" HOME="$home" CONFIG_PROMPT=1 install \
+            > "$prompt_output" 2>&1; then
+        fail_test "config replacement rejection failed"
+    fi
+    assert_contains "$prompt_output" "Replace existing local config" \
+        "config replacement prompt was not shown"
+    assert_command_succeeds "rejected config replacement changed the file" \
+        cmp -s "$preserved_config" "$installed_config"
+
+    if ! printf '%s\n' y | env XDG_CONFIG_HOME="$xdg_home" \
+            make -C "$REPO_ROOT" HOME="$home" CONFIG_PROMPT=1 install \
+            > "$prompt_output" 2>&1; then
+        fail_test "config replacement acceptance failed"
+    fi
+    assert_command_succeeds "accepted config replacement did not install source" \
+        cmp -s "$RUNNER_CONFIG" "$installed_config"
+
+    symlink_target="$WORKSPACE/t6/symlink-tmux.conf"
+    cp -- "$installed_config" "$symlink_target"
+    rm -f -- "$installed_config"
+    ln -s -- "$symlink_target" "$installed_config"
+    if ! printf '%s\n' y | env XDG_CONFIG_HOME="$xdg_home" \
+            make -C "$REPO_ROOT" HOME="$home" CONFIG_PROMPT=1 install \
+            > "$prompt_output" 2>&1; then
+        fail_test "config symlink preservation install failed"
+    fi
+    if [[ ! -L "$installed_config" ]]; then
+        fail_test "config prompt replaced the local config symlink"
+    fi
+    assert_contains "$prompt_output" "Preserved local config symlink" \
+        "config symlink preservation was not reported"
+    assert_command_succeeds "config prompt changed the symlink target" \
+        cmp -s "$RUNNER_CONFIG" "$symlink_target"
     pass_test T6 \
-        "isolated local installation, config preservation, and execution"
+        "isolated install, config prompt, preservation, and execution"
 }
 
 function test_t7_documentation {
@@ -3782,6 +3825,10 @@ function test_t7_documentation {
         "README omits completion install path"
     assert_contains "$README" "preserve the local file byte for byte" \
         "README omits config preservation"
+    assert_contains "$README" "CONFIG_PROMPT=1" \
+        "README omits the config replacement prompt"
+    assert_contains "$README" "symlink is always preserved" \
+        "README omits config symlink preservation"
     assert_contains "$README" "make install" \
         "README omits the install command"
     assert_contains "$README" "command -v bash" \

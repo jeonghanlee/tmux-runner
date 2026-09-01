@@ -407,6 +407,15 @@ ${XDG_CONFIG_HOME:-$HOME/.config}/tmux-runner/tmux.conf
 The executable is installed with mode `0755` and the completion file with mode
 `0644`. The starter config is installed with mode `0644` only when the target
 does not already exist; later installs preserve the local file byte for byte.
+To decide interactively whether to replace an existing regular config with the
+repository version, run:
+
+```bash
+make install CONFIG_PROMPT=1
+```
+
+The prompt accepts `y` or `Y` to replace the file. Empty input, any other
+input, or end-of-file preserves it. A config symlink is always preserved.
 The install does not modify shell startup files. Prepare the current Bash
 session to find the installed executable, then confirm the resolved path:
 
@@ -475,7 +484,8 @@ tmux-runner --version
 ```
 
 Reinstallation replaces the executable and completion file. It preserves an
-existing local `tmux.conf`.
+existing local `tmux.conf` unless `CONFIG_PROMPT=1` is used and replacement is
+confirmed.
 
 ## Local Configuration
 
