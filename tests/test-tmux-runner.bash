@@ -2969,16 +2969,16 @@ function start_ack_ticket_aba_entries {
     fi
 }
 
-function exercise_m6_t4_ack_ticket_aba {
+function exercise_navigation_concurrency_ack_ticket_aba {
     local root=""
-    local home="$WORKSPACE/m6-t4-aba/home"
-    local xdg_home="$WORKSPACE/m6-t4-aba/xdg"
-    local state_home="$WORKSPACE/m6-t4-aba/state-home"
+    local home="$WORKSPACE/navigation-concurrency-aba/home"
+    local xdg_home="$WORKSPACE/navigation-concurrency-aba/xdg"
+    local state_home="$WORKSPACE/navigation-concurrency-aba/state-home"
     local state_directory=""
     local state_file=""
-    local gate_directory="$WORKSPACE/m6-t4-aba/gate"
-    local wrapper_directory="$WORKSPACE/m6-t4-aba/wrappers"
-    local session_root="$WORKSPACE/m6-t4-aba/sessions"
+    local gate_directory="$WORKSPACE/navigation-concurrency-aba/gate"
+    local wrapper_directory="$WORKSPACE/navigation-concurrency-aba/wrappers"
+    local session_root="$WORKSPACE/navigation-concurrency-aba/sessions"
     local session_name=""
     local session_path=""
     local attempt_file=""
@@ -2994,7 +2994,7 @@ function exercise_m6_t4_ack_ticket_aba {
     local -a session_paths=()
     local -a attempt_files=()
 
-    create_tmux_root m6-t4-aba
+    create_tmux_root navigation-concurrency-aba
     root="$NEW_TMUX_ROOT"
     export XDG_STATE_HOME="$state_home"
     state_directory=$(runner_state_directory_for "$state_home")
@@ -3021,7 +3021,7 @@ function exercise_m6_t4_ack_ticket_aba {
     create_ack_ticket_aba_wrappers "$gate_directory" "$wrapper_directory"
     configure_ack_ticket_aba_server_environment "$root" \
         "$gate_directory" "$wrapper_directory"
-    start_ack_ticket_aba_entries m6-t4-aba "$root" "$home" \
+    start_ack_ticket_aba_entries navigation-concurrency-aba "$root" "$home" \
         "$xdg_home" "$RUNNER" "$state_directory" "$gate_directory" \
         "$wrapper_directory" "${session_names[@]}"
 
@@ -3059,7 +3059,7 @@ function exercise_m6_t4_ack_ticket_aba {
     if ! wait_for_state_row_count "$state_file" recent 3; then
         fail_test "ticket ABA updates did not retain three recent paths"
     fi
-    finish_concurrent_state_entries m6-t4-aba "$root"
+    finish_concurrent_state_entries navigation-concurrency-aba "$root"
     if ! wait_for_no_state_transactions "$state_directory"; then
         fail_test "ticket ABA run left transaction or ticket debris"
     fi
@@ -4102,7 +4102,7 @@ function test_t9_version {
     pass_test T9 "$TEST_VARIANT and fixture version metadata"
 }
 
-function test_m3_t1_static_server_path {
+function test_server_command_path {
     local runner_tmux_calls=0
 
     # These patterns inspect literal variable references in the shipped code.
@@ -4119,23 +4119,23 @@ function test_m3_t1_static_server_path {
     assert_contains "$RUNNER_CONFIG" \
         "Local configuration for the tmux-runner server." \
         "starter config is not the shipped no-op file"
-    pass_test M3-T1 "centralized dedicated-server path"
+    pass_test SERVER-COMMAND-PATH "centralized dedicated-server path"
 }
 
-function test_m3_t2_server_isolation {
+function test_server_isolation {
     local root=""
     local home=""
     local xdg_home=""
-    local list_output="$WORKSPACE/m3-t2/list.out"
-    local list_error="$WORKSPACE/m3-t2/list.err"
+    local list_output="$WORKSPACE/server-isolation/list.out"
+    local list_error="$WORKSPACE/server-isolation/list.err"
     local completion_output=""
     local default_before=""
     local rc=0
 
-    create_tmux_root m3-t2
+    create_tmux_root server-isolation
     root="$NEW_TMUX_ROOT"
-    home="$WORKSPACE/m3-t2/home"
-    xdg_home="$WORKSPACE/m3-t2/xdg"
+    home="$WORKSPACE/server-isolation/home"
+    xdg_home="$WORKSPACE/server-isolation/xdg"
     mkdir -p -- "$home" "$xdg_home"
     run_default_tmux "$root" -f /dev/null new-session -d -s default-only
     run_tmux "$root" -f /dev/null new-session -d -s runner-only
@@ -4162,9 +4162,9 @@ function test_m3_t2_server_isolation {
         fail_test "completion exposed a default-server session"
     fi
 
-    run_outside_success m3-t2-attach "$root" "$home" "$xdg_home" \
+    run_outside_success server-isolation-attach "$root" "$home" "$xdg_home" \
         "$RUNNER" runner-only attach runner-only
-    run_outside_success m3-t2-create "$root" "$home" "$xdg_home" \
+    run_outside_success server-isolation-create "$root" "$home" "$xdg_home" \
         "$RUNNER" runner-created create -s runner-created -c "$home"
     assert_equal "$default_before" "$(one_server_snapshot "$root" default)" \
         "runner operations changed the default server"
@@ -4173,10 +4173,10 @@ function test_m3_t2_server_isolation {
     assert_equal "default-only" \
         "$(run_default_tmux "$root" list-sessions -F '#{session_name}')" \
         "default server session set changed"
-    pass_test M3-T2 "create, list, attach, and completion server isolation"
+    pass_test SERVER-ISOLATION "create, list, attach, and completion server isolation"
 }
 
-function test_m3_t3_config_lifecycle {
+function test_server_config_lifecycle {
     local root=""
     local home=""
     local xdg_home=""
@@ -4185,10 +4185,10 @@ function test_m3_t3_config_lifecycle {
     local marker=""
     local binding=""
 
-    create_tmux_root m3-t3
+    create_tmux_root server-config
     root="$NEW_TMUX_ROOT"
-    home="$WORKSPACE/m3-t3/home"
-    xdg_home="$WORKSPACE/m3-t3/xdg"
+    home="$WORKSPACE/server-config/home"
+    xdg_home="$WORKSPACE/server-config/xdg"
     config_file="$xdg_home/tmux-runner/tmux.conf"
     mkdir -p -- "$home" "${config_file%/*}"
     printf '%s\n' 'set -g @general-marker general' > "$home/.tmux.conf"
@@ -4199,7 +4199,7 @@ function test_m3_t3_config_lifecycle {
         "default server did not load its general marker"
     default_before=$(one_server_snapshot "$root" default)
 
-    run_outside_success m3-t3-absent "$root" "$home" "$xdg_home" \
+    run_outside_success server-config-absent "$root" "$home" "$xdg_home" \
         "$RUNNER" isolated create -s isolated -c "$home"
     marker=$(run_tmux "$root" show-options -gv @general-marker 2>/dev/null || true)
     assert_equal "" "$marker" \
@@ -4207,7 +4207,7 @@ function test_m3_t3_config_lifecycle {
     run_tmux "$root" kill-server
 
     cp "$RUNNER_CONFIG" "$config_file"
-    run_outside_success m3-t3-starter "$root" "$home" "$xdg_home" \
+    run_outside_success server-config-starter "$root" "$home" "$xdg_home" \
         "$RUNNER" starter create -s starter -c "$home"
     run_tmux "$root" kill-server
 
@@ -4216,7 +4216,7 @@ function test_m3_t3_config_lifecycle {
         printf '%s\n' 'set -g status off'
         printf '%s\n' 'bind-key C-r display-message runner-one'
     } > "$config_file"
-    run_outside_success m3-t3-first "$root" "$home" "$xdg_home" \
+    run_outside_success server-config-first "$root" "$home" "$xdg_home" \
         "$RUNNER" configured create -s configured -c "$home"
     assert_equal "one" "$(run_tmux "$root" show-options -gv @runner-marker)" \
         "runner config marker did not load"
@@ -4232,7 +4232,7 @@ function test_m3_t3_config_lifecycle {
         printf '%s\n' 'set -g status on'
         printf '%s\n' 'bind-key C-r display-message runner-two'
     } > "$config_file"
-    run_outside_success m3-t3-running "$root" "$home" "$xdg_home" \
+    run_outside_success server-config-running "$root" "$home" "$xdg_home" \
         "$RUNNER" configured attach configured
     assert_equal "one" "$(run_tmux "$root" show-options -gv @runner-marker)" \
         "running server reloaded its config"
@@ -4240,7 +4240,7 @@ function test_m3_t3_config_lifecycle {
         "running server changed its status option"
 
     run_tmux "$root" kill-server
-    run_outside_success m3-t3-restart "$root" "$home" "$xdg_home" \
+    run_outside_success server-config-restart "$root" "$home" "$xdg_home" \
         "$RUNNER" configured-again create -s configured-again -c "$home"
     assert_equal "two" "$(run_tmux "$root" show-options -gv @runner-marker)" \
         "restarted server did not reload its config"
@@ -4252,10 +4252,10 @@ function test_m3_t3_config_lifecycle {
     fi
     assert_equal "$default_before" "$(one_server_snapshot "$root" default)" \
         "runner config lifecycle changed the default server"
-    pass_test M3-T3 "isolated first-start config and dedicated-only reload"
+    pass_test SERVER-CONFIG-LIFECYCLE "isolated first-start config and dedicated-only reload"
 }
 
-function test_m3_t4_client_boundary {
+function test_server_client_boundary {
     local root=""
     local home=""
     local xdg_home=""
@@ -4263,21 +4263,21 @@ function test_m3_t4_client_boundary {
     local status=""
     local runner_socket=""
 
-    create_tmux_root m3-t4
+    create_tmux_root server-client
     root="$NEW_TMUX_ROOT"
-    home="$WORKSPACE/m3-t4/home"
-    xdg_home="$WORKSPACE/m3-t4/xdg"
+    home="$WORKSPACE/server-client/home"
+    xdg_home="$WORKSPACE/server-client/xdg"
     mkdir -p -- "$home" "$xdg_home"
     runner_socket="$root/tmux-$UID/$RUNNER_SERVER_NAME"
     run_default_tmux "$root" -f /dev/null new-session -d -s "$source_session"
-    start_default_source_client m3-t4 "$root" "$home" "$xdg_home" \
+    start_default_source_client server-client "$root" "$home" "$xdg_home" \
         "$source_session"
     if [[ -e "$runner_socket" ]]; then
         fail_test "client-boundary fixture started the dedicated socket early"
     fi
 
-    start_dual_state_monitor m3-t4 "$root"
-    invoke_runner_inside_default m3-t4-reject "$root" "$home" "$xdg_home" \
+    start_dual_state_monitor server-client "$root"
+    invoke_runner_inside_default server-client-reject "$root" "$home" "$xdg_home" \
         "$source_session" "$RUNNER" create -s forbidden -c "$home"
     if ! wait_for_file "$LAST_INSIDE_STATUS"; then
         fail_test "other-server rejection did not record status"
@@ -4288,12 +4288,12 @@ function test_m3_t4_client_boundary {
     assert_contains "$LAST_INSIDE_TRACE" \
         "detach and rerun tmux-runner from the outer shell" \
         "other-server rejection omitted detach guidance"
-    stop_state_monitor m3-t4
+    stop_state_monitor server-client
     if [[ -e "$runner_socket" ]]; then
         fail_test "other-server rejection created the dedicated socket"
     fi
 
-    invoke_runner_inside_default m3-t4-help "$root" "$home" "$xdg_home" \
+    invoke_runner_inside_default server-client-help "$root" "$home" "$xdg_home" \
         "$source_session" "$RUNNER" --help
     if ! wait_for_file "$LAST_INSIDE_STATUS"; then
         fail_test "help inside another server did not record status"
@@ -4303,7 +4303,7 @@ function test_m3_t4_client_boundary {
     assert_contains "$LAST_INSIDE_TRACE" "Session commands use the dedicated" \
         "help omitted the dedicated-server contract"
 
-    invoke_runner_inside_default m3-t4-version "$root" "$home" "$xdg_home" \
+    invoke_runner_inside_default server-client-version "$root" "$home" "$xdg_home" \
         "$source_session" "$RUNNER" --version
     if ! wait_for_file "$LAST_INSIDE_STATUS"; then
         fail_test "version inside another server did not record status"
@@ -4316,23 +4316,23 @@ function test_m3_t4_client_boundary {
     detach_current_client
     finish_current_pty
     assert_last_pty_succeeded "default source client failed"
-    pass_test M3-T4 "dedicated switching and cold other-server rejection"
+    pass_test SERVER-CLIENT-BOUNDARY "dedicated switching and cold other-server rejection"
 }
 
-function test_m4_t1_repository_identity {
+function test_identity_repository {
     local root=""
     local ambient_root=""
-    local home="$WORKSPACE/m4-t1/home"
-    local xdg_home="$WORKSPACE/m4-t1/xdg"
-    local repository="$WORKSPACE/m4-t1/project.repo"
-    local ambient_repository="$WORKSPACE/m4-t1/ambient.repo"
+    local home="$WORKSPACE/identity-repository/home"
+    local xdg_home="$WORKSPACE/identity-repository/xdg"
+    local repository="$WORKSPACE/identity-repository/project.repo"
+    local ambient_repository="$WORKSPACE/identity-repository/ambient.repo"
     local subdir_one="$repository/src/one"
     local subdir_two="$repository/src/two"
     local short_hostname=""
     local session_name=""
     local identity_before=""
 
-    create_tmux_root m4-t1
+    create_tmux_root identity-repository
     root="$NEW_TMUX_ROOT"
     mkdir -p -- "$home" "$xdg_home"
     init_git_repository "$repository"
@@ -4343,7 +4343,7 @@ function test_m4_t1_repository_identity {
     short_hostname="${short_hostname//:/_}"
     session_name="project_repo-$short_hostname"
 
-    run_outside_success m4-t1-first "$root" "$home" "$xdg_home" \
+    run_outside_success identity-repository-first "$root" "$home" "$xdg_home" \
         "$RUNNER" "$session_name" create -c "$subdir_one"
     assert_equal "$repository" "$(session_path "$root" "$session_name")" \
         "repository session recorded the wrong canonical path"
@@ -4351,7 +4351,7 @@ function test_m4_t1_repository_identity {
         "repository session did not start at the Git top level"
     identity_before=$(session_identity "$root" "$session_name")
 
-    run_outside_success m4-t1-second "$root" "$home" "$xdg_home" \
+    run_outside_success identity-repository-second "$root" "$home" "$xdg_home" \
         "$RUNNER" "$session_name" create -c "$subdir_two"
     assert_equal "$identity_before" \
         "$(session_identity "$root" "$session_name")" \
@@ -4360,9 +4360,9 @@ function test_m4_t1_repository_identity {
         "$TMUX_RUNNER_TRACE_PREFIX new-session" \
         "repository path reuse created another session"
 
-    create_tmux_root m4-t1-ambient
+    create_tmux_root identity-repository-ambient
     ambient_root="$NEW_TMUX_ROOT"
-    start_pty_command m4-t1-ambient "$ambient_root" "$home" "$xdg_home" \
+    start_pty_command identity-repository-ambient "$ambient_root" "$home" "$xdg_home" \
         env GIT_DIR="$ambient_repository/.git" \
         GIT_WORK_TREE="$ambient_repository" bash -x "$RUNNER" \
         create -c "$subdir_one"
@@ -4375,32 +4375,32 @@ function test_m4_t1_repository_identity {
     assert_equal "$repository" \
         "$(session_path "$ambient_root" "$session_name")" \
         "ambient Git controls changed create folder identity"
-    pass_test M4-T1 "Git top-level path identity and subdirectory reuse"
+    pass_test IDENTITY-REPOSITORY "Git top-level path identity and subdirectory reuse"
 }
 
-function test_m4_t2_collision_identity {
+function test_identity_collision {
     local root=""
-    local home="$WORKSPACE/m4-t2/home"
-    local xdg_home="$WORKSPACE/m4-t2/xdg"
+    local home="$WORKSPACE/identity-collision/home"
+    local xdg_home="$WORKSPACE/identity-collision/xdg"
     local short_hostname=""
-    local repo_one="$WORKSPACE/m4-t2/base-one/shared"
-    local repo_two="$WORKSPACE/m4-t2/base-two/shared"
-    local deep_one="$WORKSPACE/m4-t2/top-one/common/deep"
-    local deep_two="$WORKSPACE/m4-t2/top-two/common/deep"
-    local triple_one="$WORKSPACE/m4-t2/head-one/same/middle/triple"
-    local triple_two="$WORKSPACE/m4-t2/head-two/same/middle/triple"
-    local norm_one="$WORKSPACE/m4-t2/hash/alpha.dot/norm"
-    local norm_two="$WORKSPACE/m4-t2/hash/alpha:dot/norm"
-    local race_one="$WORKSPACE/m4-t2/race-one/race"
-    local race_two="$WORKSPACE/m4-t2/race-two/race"
+    local repo_one="$WORKSPACE/identity-collision/base-one/shared"
+    local repo_two="$WORKSPACE/identity-collision/base-two/shared"
+    local deep_one="$WORKSPACE/identity-collision/top-one/common/deep"
+    local deep_two="$WORKSPACE/identity-collision/top-two/common/deep"
+    local triple_one="$WORKSPACE/identity-collision/head-one/same/middle/triple"
+    local triple_two="$WORKSPACE/identity-collision/head-two/same/middle/triple"
+    local norm_one="$WORKSPACE/identity-collision/hash/alpha.dot/norm"
+    local norm_two="$WORKSPACE/identity-collision/hash/alpha:dot/norm"
+    local race_one="$WORKSPACE/identity-collision/race-one/race"
+    local race_two="$WORKSPACE/identity-collision/race-two/race"
     local hash_output=""
     local path_hash=""
     local full_stem=""
     local occupied_name=""
     local hash_name=""
-    local unrelated_path="$WORKSPACE/m4-t2/unrelated"
+    local unrelated_path="$WORKSPACE/identity-collision/unrelated"
 
-    create_tmux_root m4-t2
+    create_tmux_root identity-collision
     root="$NEW_TMUX_ROOT"
     mkdir -p -- "$home" "$xdg_home" "$unrelated_path"
     init_git_repository "$repo_one"
@@ -4417,9 +4417,9 @@ function test_m4_t2_collision_identity {
     short_hostname="${short_hostname//./_}"
     short_hostname="${short_hostname//:/_}"
 
-    run_outside_success m4-t2-base-one "$root" "$home" "$xdg_home" \
+    run_outside_success identity-collision-base-one "$root" "$home" "$xdg_home" \
         "$RUNNER" "shared-$short_hostname" create -c "$repo_one"
-    run_outside_success m4-t2-base-two "$root" "$home" "$xdg_home" \
+    run_outside_success identity-collision-base-two "$root" "$home" "$xdg_home" \
         "$RUNNER" "base-two-shared-$short_hostname" create -c "$repo_two"
     assert_equal "$repo_one" \
         "$(session_path "$root" "shared-$short_hostname")" \
@@ -4428,17 +4428,17 @@ function test_m4_t2_collision_identity {
         "$(session_path "$root" "base-two-shared-$short_hostname")" \
         "one-parent collision name recorded the wrong path"
 
-    run_outside_success m4-t2-deep-one "$root" "$home" "$xdg_home" \
+    run_outside_success identity-collision-deep-one "$root" "$home" "$xdg_home" \
         "$RUNNER" "deep-$short_hostname" create -c "$deep_one"
-    run_outside_success m4-t2-deep-two "$root" "$home" "$xdg_home" \
+    run_outside_success identity-collision-deep-two "$root" "$home" "$xdg_home" \
         "$RUNNER" "top-two-common-deep-$short_hostname" create -c "$deep_two"
-    run_outside_success m4-t2-triple-one "$root" "$home" "$xdg_home" \
+    run_outside_success identity-collision-triple-one "$root" "$home" "$xdg_home" \
         "$RUNNER" "triple-$short_hostname" create -c "$triple_one"
-    run_outside_success m4-t2-triple-two "$root" "$home" "$xdg_home" \
+    run_outside_success identity-collision-triple-two "$root" "$home" "$xdg_home" \
         "$RUNNER" "head-two-same-middle-triple-$short_hostname" create \
         -c "$triple_two"
 
-    run_outside_success m4-t2-norm-one "$root" "$home" "$xdg_home" \
+    run_outside_success identity-collision-norm-one "$root" "$home" "$xdg_home" \
         "$RUNNER" "norm-$short_hostname" create -c "$norm_one"
     hash_output=$(printf '%s' "$norm_two" | sha256sum)
     path_hash="${hash_output%% *}"
@@ -4451,7 +4451,7 @@ function test_m4_t2_collision_identity {
     run_tmux "$root" new-session -d -s "$occupied_name" -c "$unrelated_path"
     run_tmux "$root" set-option -t "=$occupied_name:" \
         @tmux-runner-path "$unrelated_path"
-    run_outside_success m4-t2-norm-two "$root" "$home" "$xdg_home" \
+    run_outside_success identity-collision-norm-two "$root" "$home" "$xdg_home" \
         "$RUNNER" "$hash_name" create -c "$norm_two"
     assert_equal "$norm_two" "$(session_path "$root" "$hash_name")" \
         "normalized collision did not extend the occupied hash prefix"
@@ -4459,7 +4459,7 @@ function test_m4_t2_collision_identity {
         "$(session_path "$root" "$occupied_name")" \
         "hash collision handling changed the occupied session marker"
 
-    run_concurrent_auto_create m4-t2-race "$root" "$home" "$xdg_home" \
+    run_concurrent_auto_create identity-collision-race "$root" "$home" "$xdg_home" \
         "$RUNNER" "$race_one" "$race_two"
     assert_equal "1" \
         "$(session_name_for_path "$root" "$race_one" | grep -c .)" \
@@ -4467,20 +4467,20 @@ function test_m4_t2_collision_identity {
     assert_equal "1" \
         "$(session_name_for_path "$root" "$race_two" | grep -c .)" \
         "concurrent second path did not keep one session"
-    pass_test M4-T2 "minimum-parent, hash-extension, and concurrent identity"
+    pass_test IDENTITY-COLLISION "minimum-parent, hash-extension, and concurrent identity"
 }
 
-function test_m4_t3_worktree_identity {
+function test_identity_worktree {
     local root=""
-    local home="$WORKSPACE/m4-t3/home"
-    local xdg_home="$WORKSPACE/m4-t3/xdg"
-    local main_repo="$WORKSPACE/m4-t3/main-repo"
-    local linked_repo="$WORKSPACE/m4-t3/linked-repo"
+    local home="$WORKSPACE/identity-worktree/home"
+    local xdg_home="$WORKSPACE/identity-worktree/xdg"
+    local main_repo="$WORKSPACE/identity-worktree/main-repo"
+    local linked_repo="$WORKSPACE/identity-worktree/linked-repo"
     local short_hostname=""
     local main_name=""
     local linked_name=""
 
-    create_tmux_root m4-t3
+    create_tmux_root identity-worktree
     root="$NEW_TMUX_ROOT"
     mkdir -p -- "$home" "$xdg_home"
     init_git_repository "$main_repo"
@@ -4491,9 +4491,9 @@ function test_m4_t3_worktree_identity {
     main_name="main-repo-$short_hostname"
     linked_name="linked-repo-$short_hostname"
 
-    run_outside_success m4-t3-main "$root" "$home" "$xdg_home" \
+    run_outside_success identity-worktree-main "$root" "$home" "$xdg_home" \
         "$RUNNER" "$main_name" create -c "$main_repo"
-    run_outside_success m4-t3-linked "$root" "$home" "$xdg_home" \
+    run_outside_success identity-worktree-linked "$root" "$home" "$xdg_home" \
         "$RUNNER" "$linked_name" create -c "$linked_repo"
     assert_not_equal "$(session_identity "$root" "$main_name")" \
         "$(session_identity "$root" "$linked_name")" \
@@ -4504,24 +4504,24 @@ function test_m4_t3_worktree_identity {
         "linked working tree recorded the wrong path"
     assert_equal "$linked_repo" "$(pane_directory "$root" "$linked_name")" \
         "linked working tree session started in the wrong path"
-    pass_test M4-T3 "real linked-worktree identity"
+    pass_test IDENTITY-WORKTREE "real linked-worktree identity"
 }
 
-function test_m4_t4_directory_and_explicit_identity {
+function test_identity_explicit {
     local root=""
-    local home="$WORKSPACE/m4-t4/home"
-    local xdg_home="$WORKSPACE/m4-t4/xdg"
-    local physical_dir="$WORKSPACE/m4-t4/physical-folder"
-    local alias_dir="$WORKSPACE/m4-t4/folder-alias"
-    local repository="$WORKSPACE/m4-t4/explicit-repo"
-    local single_repo="$WORKSPACE/m4-t4/single-repo"
-    local other_path="$WORKSPACE/m4-t4/other-path"
+    local home="$WORKSPACE/identity-explicit/home"
+    local xdg_home="$WORKSPACE/identity-explicit/xdg"
+    local physical_dir="$WORKSPACE/identity-explicit/physical-folder"
+    local alias_dir="$WORKSPACE/identity-explicit/folder-alias"
+    local repository="$WORKSPACE/identity-explicit/explicit-repo"
+    local single_repo="$WORKSPACE/identity-explicit/single-repo"
+    local other_path="$WORKSPACE/identity-explicit/other-path"
     local short_hostname=""
     local physical_name=""
     local identity_before=""
     local fingerprint_before=""
 
-    create_tmux_root m4-t4
+    create_tmux_root identity-explicit
     root="$NEW_TMUX_ROOT"
     mkdir -p -- "$home" "$xdg_home" "$physical_dir" "$other_path"
     ln -s -- "$physical_dir" "$alias_dir"
@@ -4532,21 +4532,21 @@ function test_m4_t4_directory_and_explicit_identity {
     short_hostname="${short_hostname//:/_}"
     physical_name="physical-folder-$short_hostname"
 
-    run_outside_success m4-t4-physical "$root" "$home" "$xdg_home" \
+    run_outside_success identity-explicit-physical "$root" "$home" "$xdg_home" \
         "$RUNNER" "$physical_name" create -c "$physical_dir"
     identity_before=$(session_identity "$root" "$physical_name")
-    run_outside_success m4-t4-alias "$root" "$home" "$xdg_home" \
+    run_outside_success identity-explicit-alias "$root" "$home" "$xdg_home" \
         "$RUNNER" "$physical_name" create -c "$alias_dir"
     assert_equal "$identity_before" \
         "$(session_identity "$root" "$physical_name")" \
         "symlink path did not reuse the physical directory identity"
 
-    run_outside_success m4-t4-explicit-one "$root" "$home" "$xdg_home" \
+    run_outside_success identity-explicit-explicit-one "$root" "$home" "$xdg_home" \
         "$RUNNER" explicit-one create -s explicit-one -c "$repository"
-    run_outside_success m4-t4-explicit-two "$root" "$home" "$xdg_home" \
+    run_outside_success identity-explicit-explicit-two "$root" "$home" "$xdg_home" \
         "$RUNNER" explicit-two create -s explicit-two -c "$repository"
     fingerprint_before=$(server_fingerprint "$root")
-    run_outside_failure m4-t4-ambiguous "$root" "$home" "$xdg_home" \
+    run_outside_failure identity-explicit-ambiguous "$root" "$home" "$xdg_home" \
         "$RUNNER" create -c "$repository"
     assert_contains "$LAST_TRANSCRIPT" "multiple sessions match path" \
         "ambiguous automatic lookup omitted its error"
@@ -4557,16 +4557,16 @@ function test_m4_t4_directory_and_explicit_identity {
     assert_equal "$fingerprint_before" "$(server_fingerprint "$root")" \
         "ambiguous automatic lookup changed tmux state"
 
-    run_outside_success m4-t4-single-explicit "$root" "$home" "$xdg_home" \
+    run_outside_success identity-explicit-single-explicit "$root" "$home" "$xdg_home" \
         "$RUNNER" chosen-name create -s chosen-name -c "$single_repo"
-    run_outside_success m4-t4-single-auto "$root" "$home" "$xdg_home" \
+    run_outside_success identity-explicit-single-auto "$root" "$home" "$xdg_home" \
         "$RUNNER" chosen-name create -c "$single_repo"
     assert_not_contains "$LAST_TRANSCRIPT" \
         "$TMUX_RUNNER_TRACE_PREFIX new-session" \
         "automatic lookup ignored one exact path match"
 
     run_tmux "$root" new-session -d -s unmarked-name -c "$other_path"
-    run_outside_failure m4-t4-unmarked "$root" "$home" "$xdg_home" \
+    run_outside_failure identity-explicit-unmarked "$root" "$home" "$xdg_home" \
         "$RUNNER" create -s unmarked-name -c "$repository"
     assert_contains "$LAST_TRANSCRIPT" \
         "exists without @tmux-runner-path" \
@@ -4575,17 +4575,17 @@ function test_m4_t4_directory_and_explicit_identity {
     run_tmux "$root" new-session -d -s mismatched-name -c "$other_path"
     run_tmux "$root" set-option -t '=mismatched-name:' \
         @tmux-runner-path "$other_path"
-    run_outside_failure m4-t4-mismatch "$root" "$home" "$xdg_home" \
+    run_outside_failure identity-explicit-mismatch "$root" "$home" "$xdg_home" \
         "$RUNNER" create -s mismatched-name -c "$repository"
     assert_contains "$LAST_TRANSCRIPT" "belongs to $other_path" \
         "mismatched explicit conflict omitted the recorded path"
     assert_equal "$other_path" \
         "$(session_path "$root" mismatched-name)" \
         "mismatched explicit conflict changed the recorded path"
-    pass_test M4-T4 "physical paths, path-first reuse, and explicit conflicts"
+    pass_test IDENTITY-EXPLICIT "physical paths, path-first reuse, and explicit conflicts"
 }
 
-function test_m4_t5_regression_integration {
+function test_identity_regression {
     assert_contains "$README" "@tmux-runner-path" \
         "README omits the canonical session path marker"
     assert_contains "$README" "main working tree" \
@@ -4606,31 +4606,31 @@ function test_m4_t5_regression_integration {
     assert_contains "$WORKSPACE/t8/create-long.stdout" \
         "Explicit -s names fail if occupied by another or unmarked path." \
         "create help omits explicit-name conflict behavior"
-    pass_test M4-T5 "M1-M4 command, install, server, and identity integration"
+    pass_test IDENTITY-REGRESSION "core-through-identity command, install, server, and identity integration"
 }
 
-function test_m5_t1_repository_configuration {
+function test_catalog_configuration {
     local root=""
-    local home="$WORKSPACE/m5-t1/home"
-    local xdg_home="$WORKSPACE/m5-t1/xdg"
+    local home="$WORKSPACE/catalog-configuration/home"
+    local xdg_home="$WORKSPACE/catalog-configuration/xdg"
     local repos_file="$xdg_home/tmux-runner/repos"
-    local literal_root="$WORKSPACE/m5-t1/catalog \$value *"
+    local literal_root="$WORKSPACE/catalog-configuration/catalog \$value *"
     local repository="$literal_root/repository with space"
     local command_root=""
     local command_repository=""
-    local alias_root="$WORKSPACE/m5-t1/catalog-alias"
-    local missing_root="$WORKSPACE/m5-t1/missing-root"
-    local unreadable_root="$WORKSPACE/m5-t1/unreadable-root"
-    local sentinel="$WORKSPACE/m5-t1/shell-evaluated"
+    local alias_root="$WORKSPACE/catalog-configuration/catalog-alias"
+    local missing_root="$WORKSPACE/catalog-configuration/missing-root"
+    local unreadable_root="$WORKSPACE/catalog-configuration/unreadable-root"
+    local sentinel="$WORKSPACE/catalog-configuration/shell-evaluated"
     local fingerprint_before=""
 
-    create_tmux_root m5-t1
+    create_tmux_root catalog-configuration
     root="$NEW_TMUX_ROOT"
     mkdir -p -- "$home" "$xdg_home" "$literal_root" "$unreadable_root"
     run_tmux "$root" -f /dev/null new-session -d -s configuration-sentinel
     fingerprint_before=$(server_fingerprint "$root")
 
-    run_outside_failure m5-t1-missing "$root" "$home" "$xdg_home" \
+    run_outside_failure catalog-configuration-missing "$root" "$home" "$xdg_home" \
         "$RUNNER" repo
     assert_contains "$LAST_TRANSCRIPT" "$repos_file" \
         "missing repos guidance omitted the expected path"
@@ -4640,13 +4640,13 @@ function test_m5_t1_repository_configuration {
 
     mkdir -p -- "${repos_file%/*}"
     : > "$repos_file"
-    run_outside_failure m5-t1-empty "$root" "$home" "$xdg_home" \
+    run_outside_failure catalog-configuration-empty "$root" "$home" "$xdg_home" \
         "$RUNNER" repo
     assert_contains "$LAST_TRANSCRIPT" "has no usable roots" \
         "empty repos file omitted its error"
 
     init_git_repository "$repository"
-    command_root="$WORKSPACE/m5-t1/catalog \$(touch\${IFS}\$M5_SENTINEL)"
+    command_root="$WORKSPACE/catalog-configuration/catalog \$(touch\${IFS}\$CATALOG_SENTINEL)"
     command_repository="$command_root/command repository"
     init_git_repository "$command_repository"
     ln -s -- "$literal_root" "$alias_root"
@@ -4666,9 +4666,9 @@ function test_m5_t1_repository_configuration {
         printf '$%s\n' "(touch $sentinel)"
     } > "$repos_file"
 
-    export M5_SENTINEL="$sentinel"
-    start_state_monitor m5-t1-literal "$root"
-    start_runner_outside m5-t1-literal "$root" "$home" "$xdg_home" \
+    export CATALOG_SENTINEL="$sentinel"
+    start_state_monitor catalog-configuration-literal "$root"
+    start_runner_outside catalog-configuration-literal "$root" "$home" "$xdg_home" \
         "$RUNNER" repo
     if ! wait_for_transcript_text "Select repository:"; then
         fail_test "literal repository config did not reach its prompt"
@@ -4689,25 +4689,25 @@ function test_m5_t1_repository_configuration {
     fi
     send_current_input 'not-a-number\n'
     finish_current_pty
-    stop_state_monitor m5-t1-literal
-    unset M5_SENTINEL
+    stop_state_monitor catalog-configuration-literal
+    unset CATALOG_SENTINEL
     chmod 0700 "$unreadable_root"
     assert_last_pty_failed_without_timeout \
         "literal repository config invalid selection"
     assert_equal "$fingerprint_before" "$(server_fingerprint "$root")" \
         "repository configuration failures changed tmux state"
-    pass_test M5-T1 "literal repository roots and no-state failure handling"
+    pass_test CATALOG-CONFIGURATION "literal repository roots and no-state failure handling"
 }
 
-function test_m5_t2_repository_discovery {
+function test_catalog_discovery {
     local root=""
     local first_order_root=""
     local second_order_root=""
-    local home="$WORKSPACE/m5-t2/home"
-    local xdg_home="$WORKSPACE/m5-t2/xdg"
+    local home="$WORKSPACE/catalog-discovery/home"
+    local xdg_home="$WORKSPACE/catalog-discovery/xdg"
     local repos_file="$xdg_home/tmux-runner/repos"
-    local root_repo="$WORKSPACE/m5-t2/root-repo"
-    local scan_root="$WORKSPACE/m5-t2/scan-root"
+    local root_repo="$WORKSPACE/catalog-discovery/root-repo"
+    local scan_root="$WORKSPACE/catalog-discovery/scan-root"
     local nested_repo="$scan_root/outer/nested-repo"
     local source_repo="$scan_root/source-repo"
     local linked_repo="$scan_root/linked-repo"
@@ -4720,7 +4720,7 @@ function test_m5_t2_repository_discovery {
     local newline_repo="$scan_root/newline"$'\n'"repository"
     local unreadable_subtree="$scan_root/unreadable-subtree"
     local hidden_repo="$unreadable_subtree/hidden-repo"
-    local alias_root="$WORKSPACE/m5-t2/scan-alias"
+    local alias_root="$WORKSPACE/catalog-discovery/scan-alias"
     local rows_one=""
     local rows_two=""
     local stem_one=""
@@ -4732,7 +4732,7 @@ function test_m5_t2_repository_discovery {
     local norm_one_name=""
     local norm_two_name=""
 
-    create_tmux_root m5-t2
+    create_tmux_root catalog-discovery
     root="$NEW_TMUX_ROOT"
     mkdir -p -- "$home" "${repos_file%/*}" "$scan_root" "$ordinary_dir"
     init_git_repository "$root_repo"
@@ -4758,8 +4758,8 @@ function test_m5_t2_repository_discovery {
     } > "$repos_file"
     run_tmux "$root" -f /dev/null new-session -d -s discovery-sentinel
 
-    start_state_monitor m5-t2-first "$root"
-    start_runner_outside m5-t2-first "$root" "$home" "$xdg_home" \
+    start_state_monitor catalog-discovery-first "$root"
+    start_runner_outside catalog-discovery-first "$root" "$home" "$xdg_home" \
         "$RUNNER" repo
     if ! wait_for_transcript_text "Select repository:"; then
         fail_test "first repository discovery did not reach its prompt"
@@ -4813,11 +4813,11 @@ function test_m5_t2_repository_discovery {
         "second normalized catalog collision omitted its path hash"
     send_current_input 'x\n'
     finish_current_pty
-    stop_state_monitor m5-t2-first
+    stop_state_monitor catalog-discovery-first
     assert_last_pty_failed_without_timeout "first catalog inspection"
 
-    start_state_monitor m5-t2-second "$root"
-    start_runner_outside m5-t2-second "$root" "$home" "$xdg_home" \
+    start_state_monitor catalog-discovery-second "$root"
+    start_runner_outside catalog-discovery-second "$root" "$home" "$xdg_home" \
         "$RUNNER" repo
     if ! wait_for_transcript_text "Select repository:"; then
         fail_test "second repository discovery did not reach its prompt"
@@ -4827,15 +4827,15 @@ function test_m5_t2_repository_discovery {
         "repository catalog ordering changed between runs"
     send_current_input 'x\n'
     finish_current_pty
-    stop_state_monitor m5-t2-second
+    stop_state_monitor catalog-discovery-second
     chmod 0700 "$unreadable_subtree"
     assert_last_pty_failed_without_timeout "second catalog inspection"
 
-    create_tmux_root m5-t2-first-order
+    create_tmux_root catalog-discovery-first-order
     first_order_root="$NEW_TMUX_ROOT"
-    run_repo_selection_success m5-t2-first-order-one "$first_order_root" \
+    run_repo_selection_success catalog-discovery-first-order-one "$first_order_root" \
         "$home" "$xdg_home" "$norm_one_name" "$norm_one"
-    run_repo_selection_success m5-t2-first-order-two "$first_order_root" \
+    run_repo_selection_success catalog-discovery-first-order-two "$first_order_root" \
         "$home" "$xdg_home" "$norm_two_name" "$norm_two"
     assert_equal "$norm_one_name" \
         "$(session_name_for_path "$first_order_root" "$norm_one")" \
@@ -4850,11 +4850,11 @@ function test_m5_t2_repository_discovery {
         "$(pane_directory "$first_order_root" "$norm_two_name")" \
         "first selection order opened the second normalized repository elsewhere"
 
-    create_tmux_root m5-t2-second-order
+    create_tmux_root catalog-discovery-second-order
     second_order_root="$NEW_TMUX_ROOT"
-    run_repo_selection_success m5-t2-second-order-two "$second_order_root" \
+    run_repo_selection_success catalog-discovery-second-order-two "$second_order_root" \
         "$home" "$xdg_home" "$norm_two_name" "$norm_two"
-    run_repo_selection_success m5-t2-second-order-one "$second_order_root" \
+    run_repo_selection_success catalog-discovery-second-order-one "$second_order_root" \
         "$home" "$xdg_home" "$norm_one_name" "$norm_one"
     assert_equal "$norm_one_name" \
         "$(session_name_for_path "$second_order_root" "$norm_one")" \
@@ -4868,22 +4868,22 @@ function test_m5_t2_repository_discovery {
     assert_equal "$norm_two" \
         "$(pane_directory "$second_order_root" "$norm_two_name")" \
         "opposite selection order opened the second normalized repository elsewhere"
-    pass_test M5-T2 "real Git discovery, deduplication, and stable labels"
+    pass_test CATALOG-DISCOVERY "real Git discovery, deduplication, and stable labels"
 }
 
-function test_m5_t3_repository_selection {
+function test_catalog_selection {
     local root=""
     local opposite_root=""
     local ambient_root=""
-    local home="$WORKSPACE/m5-t3/home"
-    local xdg_home="$WORKSPACE/m5-t3/xdg"
+    local home="$WORKSPACE/catalog-selection/home"
+    local xdg_home="$WORKSPACE/catalog-selection/xdg"
     local repos_file="$xdg_home/tmux-runner/repos"
-    local catalog_root="$WORKSPACE/m5-t3/catalog"
+    local catalog_root="$WORKSPACE/catalog-selection/catalog"
     local left_repo="$catalog_root/left/shared"
     local right_repo="$catalog_root/right/shared"
     local concurrent_repo="$catalog_root/concurrent"
     local legacy_repo="$catalog_root/legacy"
-    local ambient_repository="$WORKSPACE/m5-t3/ambient"
+    local ambient_repository="$WORKSPACE/catalog-selection/ambient"
     local short_hostname=""
     local left_name=""
     local right_name=""
@@ -4891,7 +4891,7 @@ function test_m5_t3_repository_selection {
     local identity_before=""
     local number=""
 
-    create_tmux_root m5-t3
+    create_tmux_root catalog-selection
     root="$NEW_TMUX_ROOT"
     mkdir -p -- "$home" "${repos_file%/*}" "$catalog_root"
     init_git_repository "$left_repo"
@@ -4907,39 +4907,39 @@ function test_m5_t3_repository_selection {
     right_name="right-shared-$short_hostname"
     concurrent_name="concurrent-$short_hostname"
 
-    run_outside_success m5-t3-create-catalog "$root" "$home" "$xdg_home" \
+    run_outside_success catalog-selection-create-catalog "$root" "$home" "$xdg_home" \
         "$RUNNER" "$right_name" create -c "$right_repo"
     assert_equal "$right_repo" "$(session_path "$root" "$right_name")" \
         "catalogued create did not use the stable catalog label"
 
-    run_repo_selection_success m5-t3-left-first "$root" "$home" \
+    run_repo_selection_success catalog-selection-left-first "$root" "$home" \
         "$xdg_home" "$left_name" "$left_repo"
     identity_before=$(session_identity "$root" "$left_name")
-    run_repo_selection_success m5-t3-left-reuse "$root" "$home" \
+    run_repo_selection_success catalog-selection-left-reuse "$root" "$home" \
         "$xdg_home" "$left_name" "$left_repo"
     assert_equal "$identity_before" "$(session_identity "$root" "$left_name")" \
         "repository reselection did not reuse its session"
 
-    run_concurrent_repo_selection m5-t3-concurrent "$root" "$home" \
+    run_concurrent_repo_selection catalog-selection-concurrent "$root" "$home" \
         "$xdg_home" "$concurrent_repo" "$concurrent_name"
     assert_equal "$concurrent_repo" \
         "$(session_path "$root" "$concurrent_name")" \
         "concurrent selectors recorded the wrong path"
 
-    run_outside_success m5-t3-legacy-create "$root" "$home" "$xdg_home" \
+    run_outside_success catalog-selection-legacy-create "$root" "$home" "$xdg_home" \
         "$RUNNER" legacy-explicit create -s legacy-explicit -c "$legacy_repo"
-    run_repo_selection_success m5-t3-legacy-select "$root" "$home" \
+    run_repo_selection_success catalog-selection-legacy-select "$root" "$home" \
         "$xdg_home" legacy-explicit "$legacy_repo"
     if run_tmux "$root" has-session -t "=legacy-$short_hostname" \
         2>/dev/null; then
         fail_test "repository selection renamed an existing path session"
     fi
 
-    create_tmux_root m5-t3-opposite
+    create_tmux_root catalog-selection-opposite
     opposite_root="$NEW_TMUX_ROOT"
-    run_repo_selection_success m5-t3-opposite-left "$opposite_root" \
+    run_repo_selection_success catalog-selection-opposite-left "$opposite_root" \
         "$home" "$xdg_home" "$left_name" "$left_repo"
-    run_repo_selection_success m5-t3-opposite-right "$opposite_root" \
+    run_repo_selection_success catalog-selection-opposite-right "$opposite_root" \
         "$home" "$xdg_home" "$right_name" "$right_repo"
     assert_equal "$left_repo" \
         "$(session_path "$opposite_root" "$left_name")" \
@@ -4948,9 +4948,9 @@ function test_m5_t3_repository_selection {
         "$(session_path "$opposite_root" "$right_name")" \
         "opposite selection order changed the right catalog identity"
 
-    create_tmux_root m5-t3-ambient
+    create_tmux_root catalog-selection-ambient
     ambient_root="$NEW_TMUX_ROOT"
-    start_pty_command m5-t3-ambient "$ambient_root" "$home" "$xdg_home" \
+    start_pty_command catalog-selection-ambient "$ambient_root" "$home" "$xdg_home" \
         env GIT_DIR="$ambient_repository/.git" \
         GIT_WORK_TREE="$ambient_repository" bash -x "$RUNNER" repo
     if ! wait_for_transcript_text "Select repository:"; then
@@ -4970,23 +4970,23 @@ function test_m5_t3_repository_selection {
     assert_equal "$left_repo" \
         "$(session_path "$ambient_root" "$left_name")" \
         "ambient Git controls changed repository selection identity"
-    pass_test M5-T3 "catalogued create, reuse, concurrency, and legacy reuse"
+    pass_test CATALOG-SELECTION "catalogued create, reuse, concurrency, and legacy reuse"
 }
 
-function test_m5_t4_repository_failures {
+function test_catalog_failures {
     local root=""
-    local home="$WORKSPACE/m5-t4/home"
-    local xdg_home="$WORKSPACE/m5-t4/xdg"
-    local empty_xdg="$WORKSPACE/m5-t4/empty-xdg"
+    local home="$WORKSPACE/catalog-failures/home"
+    local xdg_home="$WORKSPACE/catalog-failures/xdg"
+    local empty_xdg="$WORKSPACE/catalog-failures/empty-xdg"
     local repos_file="$xdg_home/tmux-runner/repos"
     local empty_repos="$empty_xdg/tmux-runner/repos"
-    local catalog_root="$WORKSPACE/m5-t4/catalog"
+    local catalog_root="$WORKSPACE/catalog-failures/catalog"
     local repository="$catalog_root/project"
     local moved_repository="$catalog_root/project.removed"
-    local plain_root="$WORKSPACE/m5-t4/plain-root"
+    local plain_root="$WORKSPACE/catalog-failures/plain-root"
     local number=""
 
-    create_tmux_root m5-t4
+    create_tmux_root catalog-failures
     root="$NEW_TMUX_ROOT"
     mkdir -p -- "$home" "${repos_file%/*}" "${empty_repos%/*}" \
         "$catalog_root" "$plain_root"
@@ -4995,33 +4995,33 @@ function test_m5_t4_repository_failures {
     printf '%s\n' "$plain_root" > "$empty_repos"
     run_tmux "$root" -f /dev/null new-session -d -s failure-sentinel
 
-    start_state_monitor m5-t4-text "$root"
-    start_runner_outside m5-t4-text "$root" "$home" "$xdg_home" \
+    start_state_monitor catalog-failures-text "$root"
+    start_runner_outside catalog-failures-text "$root" "$home" "$xdg_home" \
         "$RUNNER" repo
     wait_for_transcript_text "Select repository:" || \
         fail_test "nonnumeric repository case omitted its prompt"
     send_current_input 'not-a-number\n'
     finish_current_pty
-    stop_state_monitor m5-t4-text
+    stop_state_monitor catalog-failures-text
     assert_last_pty_failed_without_timeout "nonnumeric repository selection"
 
-    start_state_monitor m5-t4-range "$root"
-    start_runner_outside m5-t4-range "$root" "$home" "$xdg_home" \
+    start_state_monitor catalog-failures-range "$root"
+    start_runner_outside catalog-failures-range "$root" "$home" "$xdg_home" \
         "$RUNNER" repo
     wait_for_transcript_text "Select repository:" || \
         fail_test "range repository case omitted its prompt"
     send_current_input '18446744073709551617\n'
     finish_current_pty
-    stop_state_monitor m5-t4-range
+    stop_state_monitor catalog-failures-range
     assert_last_pty_failed_without_timeout "range repository selection"
 
-    run_outside_failure m5-t4-empty "$root" "$home" "$empty_xdg" \
+    run_outside_failure catalog-failures-empty "$root" "$home" "$empty_xdg" \
         "$RUNNER" repo
     assert_contains "$LAST_TRANSCRIPT" "no Git working trees found" \
         "empty repository discovery omitted its error"
 
-    start_state_monitor m5-t4-removed "$root"
-    start_runner_outside m5-t4-removed "$root" "$home" "$xdg_home" \
+    start_state_monitor catalog-failures-removed "$root"
+    start_runner_outside catalog-failures-removed "$root" "$home" "$xdg_home" \
         "$RUNNER" repo
     wait_for_transcript_text "Select repository:" || \
         fail_test "removed repository case omitted its prompt"
@@ -5030,13 +5030,13 @@ function test_m5_t4_repository_failures {
     send_current_input "$number\n"
     finish_current_pty
     mv -- "$moved_repository" "$repository"
-    stop_state_monitor m5-t4-removed
+    stop_state_monitor catalog-failures-removed
     assert_last_pty_failed_without_timeout "removed repository selection"
     assert_contains "$LAST_TRANSCRIPT" "no longer accessible" \
         "removed repository error omitted revalidation guidance"
 
-    start_state_monitor m5-t4-changed "$root"
-    start_runner_outside m5-t4-changed "$root" "$home" "$xdg_home" \
+    start_state_monitor catalog-failures-changed "$root"
+    start_runner_outside catalog-failures-changed "$root" "$home" "$xdg_home" \
         "$RUNNER" repo
     wait_for_transcript_text "Select repository:" || \
         fail_test "changed repository case omitted its prompt"
@@ -5045,13 +5045,13 @@ function test_m5_t4_repository_failures {
     send_current_input "$number\n"
     finish_current_pty
     mv -- "$repository/.git.removed" "$repository/.git"
-    stop_state_monitor m5-t4-changed
+    stop_state_monitor catalog-failures-changed
     assert_last_pty_failed_without_timeout "changed repository selection"
     assert_contains "$LAST_TRANSCRIPT" "no longer a Git working tree" \
         "changed repository error omitted revalidation guidance"
 
-    start_state_monitor m5-t4-final-recheck "$root"
-    start_entry_gated_runner_outside m5-t4-final-recheck "$root" "$home" \
+    start_state_monitor catalog-failures-final-recheck "$root"
+    start_entry_gated_runner_outside catalog-failures-final-recheck "$root" "$home" \
         "$xdg_home" "$RUNNER" list-sessions repo
     wait_for_transcript_text "Select repository:" || \
         fail_test "final repository recheck case omitted its prompt"
@@ -5066,38 +5066,38 @@ function test_m5_t4_repository_failures {
     mv -- "$repository/.git.final-recheck" "$repository/.git"
     ENTRY_GATE_READY=""
     ENTRY_GATE_RELEASE=""
-    stop_state_monitor m5-t4-final-recheck
+    stop_state_monitor catalog-failures-final-recheck
     assert_last_pty_failed_without_timeout "final repository recheck"
     assert_contains "$LAST_TRANSCRIPT" \
         "path kind changed before tmux entry" \
         "final repository recheck error omitted the changed identity"
 
-    run_outside_success m5-t4-explicit-one "$root" "$home" "$xdg_home" \
+    run_outside_success catalog-failures-explicit-one "$root" "$home" "$xdg_home" \
         "$RUNNER" repo-explicit-one create -s repo-explicit-one \
         -c "$repository"
-    run_outside_success m5-t4-explicit-two "$root" "$home" "$xdg_home" \
+    run_outside_success catalog-failures-explicit-two "$root" "$home" "$xdg_home" \
         "$RUNNER" repo-explicit-two create -s repo-explicit-two \
         -c "$repository"
-    start_state_monitor m5-t4-ambiguous "$root"
-    start_runner_outside m5-t4-ambiguous "$root" "$home" "$xdg_home" \
+    start_state_monitor catalog-failures-ambiguous "$root"
+    start_runner_outside catalog-failures-ambiguous "$root" "$home" "$xdg_home" \
         "$RUNNER" repo
     wait_for_transcript_text "Select repository:" || \
         fail_test "ambiguous repository case omitted its prompt"
     number=$(repository_selection_number "$LAST_TRANSCRIPT" "$repository")
     send_current_input "$number\n"
     finish_current_pty
-    stop_state_monitor m5-t4-ambiguous
+    stop_state_monitor catalog-failures-ambiguous
     assert_last_pty_failed_without_timeout "ambiguous repository selection"
     assert_contains "$LAST_TRANSCRIPT" "repo-explicit-one" \
         "ambiguous repository error omitted the first exact name"
     assert_contains "$LAST_TRANSCRIPT" "repo-explicit-two" \
         "ambiguous repository error omitted the second exact name"
-    pass_test M5-T4 "invalid, empty, stale, changed, and ambiguous failures"
+    pass_test CATALOG-FAILURES "invalid, empty, stale, changed, and ambiguous failures"
 }
 
-function test_m5_t5_interface_regression {
+function test_catalog_regression {
     local installed_runner="$WORKSPACE/t6/home with space/.local/bin/tmux-runner"
-    local installed_help="$WORKSPACE/m5-t5-installed-help"
+    local installed_help="$WORKSPACE/catalog-regression-installed-help"
 
     assert_contains "$WORKSPACE/t8/top-long.stdout" "repo" \
         "top-level help omits repository discovery"
@@ -5114,24 +5114,24 @@ function test_m5_t5_interface_regression {
         "README omits the repository selector command"
     assert_contains "$README" "literal absolute" \
         "README omits literal repository root parsing"
-    pass_test M5-T5 "help, completion, installation, docs, and M1-M4 regression"
+    pass_test CATALOG-REGRESSION "help, completion, installation, docs, and core-through-identity regression"
 }
 
-function test_m6_t1_recent_navigation {
+function test_navigation_recent {
     local root=""
-    local home="$WORKSPACE/m6-t1/home"
-    local xdg_home="$WORKSPACE/m6-t1/xdg"
-    local state_home="$WORKSPACE/m6-t1/state-home"
+    local home="$WORKSPACE/navigation-recent/home"
+    local xdg_home="$WORKSPACE/navigation-recent/xdg"
+    local state_home="$WORKSPACE/navigation-recent/state-home"
     local state_directory=""
     local state_file=""
     local repos_file="$xdg_home/tmux-runner/repos"
-    local catalog_root="$WORKSPACE/m6-t1/catalog"
+    local catalog_root="$WORKSPACE/navigation-recent/catalog"
     local repository_b="$catalog_root/repo-b"
-    local ambient_repository="$WORKSPACE/m6-t1/ambient"
-    local path_a="$WORKSPACE/m6-t1/path-a"
+    local ambient_repository="$WORKSPACE/navigation-recent/ambient"
+    local path_a="$WORKSPACE/navigation-recent/path-a"
     local repository_git_backup="$repository_b/.git.saved"
-    local path_a_git_backup="$WORKSPACE/m6-t1/path-a.git"
-    local bulk_root="$WORKSPACE/m6-t1/bulk"
+    local path_a_git_backup="$WORKSPACE/navigation-recent/path-a.git"
+    local bulk_root="$WORKSPACE/navigation-recent/bulk"
     local short_hostname=""
     local repository_b_name=""
     local path_a_name=""
@@ -5145,7 +5145,7 @@ function test_m6_t1_recent_navigation {
     local index=0
     local -a bulk_paths=()
 
-    create_tmux_root m6-t1
+    create_tmux_root navigation-recent
     root="$NEW_TMUX_ROOT"
     export XDG_STATE_HOME="$state_home"
     state_directory=$(runner_state_directory_for "$state_home")
@@ -5160,11 +5160,11 @@ function test_m6_t1_recent_navigation {
     repository_b_name="repo-b-$short_hostname"
     path_a_name="path-a-$short_hostname"
 
-    run_outside_success m6-t1-create-a "$root" "$home" "$xdg_home" \
+    run_outside_success navigation-recent-create-a "$root" "$home" "$xdg_home" \
         "$RUNNER" m6-a create -s m6-a -c "$path_a"
-    run_repo_selection_success m6-t1-repo-b "$root" "$home" \
+    run_repo_selection_success navigation-recent-repo-b "$root" "$home" \
         "$xdg_home" "$repository_b_name" "$repository_b"
-    start_pty_command m6-t1-recent-ambient "$root" "$home" "$xdg_home" \
+    start_pty_command navigation-recent-recent-ambient "$root" "$home" "$xdg_home" \
         env GIT_DIR="$ambient_repository/.git" \
         GIT_WORK_TREE="$ambient_repository" bash -x "$RUNNER" recent
     if ! wait_for_transcript_text "Select recent destination:"; then
@@ -5192,8 +5192,8 @@ function test_m6_t1_recent_navigation {
         "plain recent destination did not retain its kind"
 
     snapshot_before=$(state_snapshot "$state_directory")
-    start_state_monitor m6-t1-recent-final-recheck "$root"
-    start_entry_gated_runner_outside m6-t1-recent-final-recheck "$root" \
+    start_state_monitor navigation-recent-recent-final-recheck "$root"
+    start_entry_gated_runner_outside navigation-recent-recent-final-recheck "$root" \
         "$home" "$xdg_home" "$RUNNER" list-sessions recent
     if ! wait_for_transcript_text "Select recent destination:"; then
         fail_test "final recent recheck case did not display its prompt"
@@ -5212,7 +5212,7 @@ function test_m6_t1_recent_navigation {
     mv -- "$repository_git_backup" "$repository_b/.git"
     ENTRY_GATE_READY=""
     ENTRY_GATE_RELEASE=""
-    stop_state_monitor m6-t1-recent-final-recheck
+    stop_state_monitor navigation-recent-recent-final-recheck
     assert_last_pty_failed_without_timeout "final recent recheck"
     assert_contains "$LAST_TRANSCRIPT" \
         "path kind changed before tmux entry" \
@@ -5221,7 +5221,7 @@ function test_m6_t1_recent_navigation {
         "final recent recheck changed navigation state"
 
     mv -- "$repository_b/.git" "$repository_git_backup"
-    start_runner_outside m6-t1-recent-git-to-plain "$root" "$home" \
+    start_runner_outside navigation-recent-recent-git-to-plain "$root" "$home" \
         "$xdg_home" "$RUNNER" recent
     if ! wait_for_transcript_text "Select recent destination:"; then
         fail_test "Git-to-plain recent case did not display its prompt"
@@ -5237,7 +5237,7 @@ function test_m6_t1_recent_navigation {
 
     git -C "$path_a" init -q
     git -C "$path_a" config core.hooksPath /dev/null
-    start_runner_outside m6-t1-recent-plain-to-git "$root" "$home" \
+    start_runner_outside navigation-recent-recent-plain-to-git "$root" "$home" \
         "$xdg_home" "$RUNNER" recent
     if ! wait_for_transcript_text "Select recent destination:"; then
         fail_test "plain-to-Git recent case did not display its prompt"
@@ -5252,37 +5252,37 @@ function test_m6_t1_recent_navigation {
     mv -- "$path_a/.git" "$path_a_git_backup"
 
     identity_before=$(session_identity "$root" m6-a)
-    run_recent_selection_success m6-t1-recent-reuse "$root" "$home" \
+    run_recent_selection_success navigation-recent-recent-reuse "$root" "$home" \
         "$xdg_home" "$RUNNER" m6-a "$path_a"
     assert_equal "$identity_before" "$(session_identity "$root" m6-a)" \
         "recent selection did not reuse the existing path session"
 
     run_tmux "$root" new-session -d -s m6-unmarked-u
     run_tmux "$root" new-session -d -s m6-unmarked-v
-    run_outside_success m6-t1-direct-marked "$root" "$home" "$xdg_home" \
+    run_outside_success navigation-recent-direct-marked "$root" "$home" "$xdg_home" \
         "$RUNNER" "$repository_b_name" attach "$repository_b_name"
     recent_before_unmarked=$(state_record_values recent "$state_file")
-    run_outside_success m6-t1-direct-unmarked "$root" "$home" "$xdg_home" \
+    run_outside_success navigation-recent-direct-unmarked "$root" "$home" "$xdg_home" \
         "$RUNNER" m6-unmarked-u attach m6-unmarked-u
     assert_equal "$recent_before_unmarked" \
         "$(state_record_values recent "$state_file")" \
         "direct unmarked attachment changed recent paths"
-    run_outside_success m6-t1-direct-last "$root" "$home" "$xdg_home" \
+    run_outside_success navigation-recent-direct-last "$root" "$home" "$xdg_home" \
         "$RUNNER" "$repository_b_name" last
     assert_session_entry_trace "$LAST_TRANSCRIPT" "$root" \
         "$repository_b_name" "last did not target the resolved session ID"
-    run_list_selection_success m6-t1-list-marked "$root" "$home" \
+    run_list_selection_success navigation-recent-list-marked "$root" "$home" \
         "$xdg_home" "$RUNNER" m6-a
     recent_before_unmarked=$(state_record_values recent "$state_file")
-    run_list_selection_success m6-t1-list-unmarked "$root" "$home" \
+    run_list_selection_success navigation-recent-list-unmarked "$root" "$home" \
         "$xdg_home" "$RUNNER" m6-unmarked-v
     assert_equal "$recent_before_unmarked" \
         "$(state_record_values recent "$state_file")" \
         "list-selected unmarked session changed recent paths"
-    run_outside_success m6-t1-list-last "$root" "$home" "$xdg_home" \
+    run_outside_success navigation-recent-list-last "$root" "$home" "$xdg_home" \
         "$RUNNER" m6-a last
     run_tmux "$root" kill-session -t '=m6-a'
-    run_recent_selection_success m6-t1-recent-recreate "$root" "$home" \
+    run_recent_selection_success navigation-recent-recent-recreate "$root" "$home" \
         "$xdg_home" "$RUNNER" "$path_a_name" "$path_a"
     assert_equal "$path_a" "$(session_path "$root" "$path_a_name")" \
         "recent selection recreated the wrong path identity"
@@ -5292,11 +5292,11 @@ function test_m6_t1_recent_navigation {
         path="$bulk_root/path-$suffix"
         mkdir -p -- "$path"
         bulk_paths+=("$path")
-        run_outside_success "m6-t1-bulk-$suffix" "$root" "$home" \
+        run_outside_success "navigation-recent-bulk-$suffix" "$root" "$home" \
             "$xdg_home" "$RUNNER" "m6-bulk-$suffix" create \
             -s "m6-bulk-$suffix" -c "$path"
     done
-    run_outside_success m6-t1-bulk-repeat "$root" "$home" "$xdg_home" \
+    run_outside_success navigation-recent-bulk-repeat "$root" "$home" "$xdg_home" \
         "$RUNNER" m6-bulk-07 create -s m6-bulk-07 \
         -c "${bulk_paths[6]}"
 
@@ -5311,7 +5311,7 @@ function test_m6_t1_recent_navigation {
     assert_equal "$expected_paths" "$actual_paths" \
         "recent state did not retain the newest 20 unique paths"
 
-    start_runner_outside m6-t1-recent-inspect "$root" "$home" "$xdg_home" \
+    start_runner_outside navigation-recent-recent-inspect "$root" "$home" "$xdg_home" \
         "$RUNNER" recent
     if ! wait_for_transcript_text "Select recent destination:"; then
         fail_test "recent inspection did not display its prompt"
@@ -5328,21 +5328,21 @@ function test_m6_t1_recent_navigation {
     assert_state_modes "$state_directory"
     assert_no_state_transactions "$state_directory"
     unset XDG_STATE_HOME
-    pass_test M6-T1 "recent commands, marked filtering, recreation, and 20-entry MRU"
+    pass_test NAVIGATION-RECENT "recent commands, marked filtering, recreation, and 20-entry MRU"
 }
 
-function test_m6_t2_previous_navigation {
+function test_navigation_previous {
     local root=""
     local other_root=""
     local legacy_root=""
-    local home="$WORKSPACE/m6-t2/home"
-    local xdg_home="$WORKSPACE/m6-t2/xdg"
-    local state_home="$WORKSPACE/m6-t2/state-home"
-    local legacy_state_home="$WORKSPACE/m6-t2/legacy-state-home"
+    local home="$WORKSPACE/navigation-previous/home"
+    local xdg_home="$WORKSPACE/navigation-previous/xdg"
+    local state_home="$WORKSPACE/navigation-previous/state-home"
+    local legacy_state_home="$WORKSPACE/navigation-previous/legacy-state-home"
     local state_directory=""
     local state_file=""
-    local legacy_path="$WORKSPACE/m6-t2/legacy-path"
-    local legacy_git="$WORKSPACE/m6-t2/legacy-git"
+    local legacy_path="$WORKSPACE/navigation-previous/legacy-path"
+    local legacy_git="$WORKSPACE/navigation-previous/legacy-git"
     local legacy_name=""
     local server_identity=""
     local other_server_identity=""
@@ -5351,7 +5351,7 @@ function test_m6_t2_previous_navigation {
     local fingerprint_before=""
     local expected_sessions=""
 
-    create_tmux_root m6-t2
+    create_tmux_root navigation-previous
     root="$NEW_TMUX_ROOT"
     export XDG_STATE_HOME="$state_home"
     state_directory=$(runner_state_directory_for "$state_home")
@@ -5361,42 +5361,42 @@ function test_m6_t2_previous_navigation {
     run_tmux "$root" new-session -d -s m6-last-b
     fingerprint_before=$(server_identity_fingerprint "$root")
 
-    run_outside_success m6-t2-enter-a "$root" "$home" "$xdg_home" \
+    run_outside_success navigation-previous-enter-a "$root" "$home" "$xdg_home" \
         "$RUNNER" m6-last-a attach m6-last-a
-    run_outside_success m6-t2-enter-b "$root" "$home" "$xdg_home" \
+    run_outside_success navigation-previous-enter-b "$root" "$home" "$xdg_home" \
         "$RUNNER" m6-last-b attach m6-last-b
-    run_outside_success m6-t2-repeat-b "$root" "$home" "$xdg_home" \
+    run_outside_success navigation-previous-repeat-b "$root" "$home" "$xdg_home" \
         "$RUNNER" m6-last-b attach m6-last-b
-    run_outside_success m6-t2-last-a "$root" "$home" "$xdg_home" \
+    run_outside_success navigation-previous-last-a "$root" "$home" "$xdg_home" \
         "$RUNNER" m6-last-a last
-    run_outside_success m6-t2-last-b "$root" "$home" "$xdg_home" \
+    run_outside_success navigation-previous-last-b "$root" "$home" "$xdg_home" \
         "$RUNNER" m6-last-b last
 
-    run_inside_success m6-t2-inside-a "$root" "$home" "$xdg_home" \
+    run_inside_success navigation-previous-inside-a "$root" "$home" "$xdg_home" \
         m6-last-b m6-last-a "$RUNNER" last
     assert_session_entry_trace "$LAST_INSIDE_TRACE" "$root" m6-last-a \
         "inside last did not switch exactly to A"
-    run_inside_success m6-t2-inside-b "$root" "$home" "$xdg_home" \
+    run_inside_success navigation-previous-inside-b "$root" "$home" "$xdg_home" \
         m6-last-a m6-last-b "$RUNNER" last
     assert_session_entry_trace "$LAST_INSIDE_TRACE" "$root" m6-last-b \
         "inside last did not switch exactly to B"
 
-    create_tmux_root m6-t2-other
+    create_tmux_root navigation-previous-other
     other_root="$NEW_TMUX_ROOT"
     run_tmux "$other_root" -f /dev/null new-session -d -s m6-other-a
     run_tmux "$other_root" new-session -d -s m6-other-b
-    run_outside_failure m6-t2-other-empty-last "$other_root" "$home" \
+    run_outside_failure navigation-previous-other-empty-last "$other_root" "$home" \
         "$xdg_home" "$RUNNER" last
     assert_contains "$LAST_TRANSCRIPT" \
         "no previous runner session is available" \
         "last used session history from another runner server"
-    run_outside_success m6-t2-other-enter-a "$other_root" "$home" \
+    run_outside_success navigation-previous-other-enter-a "$other_root" "$home" \
         "$xdg_home" "$RUNNER" m6-other-a attach m6-other-a
-    run_outside_success m6-t2-other-enter-b "$other_root" "$home" \
+    run_outside_success navigation-previous-other-enter-b "$other_root" "$home" \
         "$xdg_home" "$RUNNER" m6-other-b attach m6-other-b
-    run_outside_success m6-t2-other-last-a "$other_root" "$home" \
+    run_outside_success navigation-previous-other-last-a "$other_root" "$home" \
         "$xdg_home" "$RUNNER" m6-other-a last
-    run_outside_success m6-t2-original-last-a "$root" "$home" \
+    run_outside_success navigation-previous-original-last-a "$root" "$home" \
         "$xdg_home" "$RUNNER" m6-last-a last
 
     server_identity=$(runner_socket_path_for_root "$root")
@@ -5423,7 +5423,7 @@ function test_m6_t2_previous_navigation {
     assert_state_modes "$state_directory"
     assert_no_state_transactions "$state_directory"
 
-    create_tmux_root m6-t2-legacy
+    create_tmux_root navigation-previous-legacy
     legacy_root="$NEW_TMUX_ROOT"
     export XDG_STATE_HOME="$legacy_state_home"
     state_directory=$(runner_state_directory_for "$legacy_state_home")
@@ -5442,7 +5442,7 @@ function test_m6_t2_previous_navigation {
     chmod 0600 "$state_file"
     run_tmux "$legacy_root" -f /dev/null new-session -d -s legacy-a
     run_tmux "$legacy_root" new-session -d -s legacy-b
-    run_outside_failure m6-t2-legacy-last "$legacy_root" "$home" \
+    run_outside_failure navigation-previous-legacy-last "$legacy_root" "$home" \
         "$xdg_home" "$RUNNER" last
     assert_contains "$LAST_TRANSCRIPT" \
         "no previous runner session is available" \
@@ -5451,7 +5451,7 @@ function test_m6_t2_previous_navigation {
     short_hostname="${short_hostname//./_}"
     short_hostname="${short_hostname//:/_}"
     legacy_name="legacy-path-$short_hostname"
-    run_recent_selection_success m6-t2-legacy-recent "$legacy_root" \
+    run_recent_selection_success navigation-previous-legacy-recent "$legacy_root" \
         "$home" "$xdg_home" "$RUNNER" "$legacy_name" "$legacy_path"
     assert_contains "$state_file" $'version\t2' \
         "successful v1 recent migration did not write state v2"
@@ -5475,45 +5475,45 @@ function test_m6_t2_previous_navigation {
     assert_state_modes "$state_directory"
     assert_no_state_transactions "$state_directory"
     unset XDG_STATE_HOME
-    pass_test M6-T2 \
+    pass_test NAVIGATION-PREVIOUS \
         "server-scoped previous-session alternation and v1 migration"
 }
 
-function exercise_m6_t3_data_failures {
+function exercise_navigation_recovery_data_failures {
     local root=""
-    local home="$WORKSPACE/m6-t3-data/home"
-    local xdg_home="$WORKSPACE/m6-t3-data/xdg"
-    local state_home="$WORKSPACE/m6-t3-data/state-home"
+    local home="$WORKSPACE/navigation-recovery-data/home"
+    local xdg_home="$WORKSPACE/navigation-recovery-data/xdg"
+    local state_home="$WORKSPACE/navigation-recovery-data/state-home"
     local state_directory=""
     local state_file=""
-    local valid_path="$WORKSPACE/m6-t3-data/valid-path"
-    local stale_path="$WORKSPACE/m6-t3-data/stale-path"
-    local moved_path="$WORKSPACE/m6-t3-data/stale-path.moved"
+    local valid_path="$WORKSPACE/navigation-recovery-data/valid-path"
+    local stale_path="$WORKSPACE/navigation-recovery-data/stale-path"
+    local moved_path="$WORKSPACE/navigation-recovery-data/stale-path.moved"
     local special_path=""
-    local sentinel="$WORKSPACE/m6-t3-data/shell-evaluated"
+    local sentinel="$WORKSPACE/navigation-recovery-data/shell-evaluated"
     local malicious_path=""
     local encoded_special=""
     local snapshot_before=""
     local snapshot_after=""
     local fingerprint_before=""
     local number=""
-    local valid_backup="$WORKSPACE/m6-t3-data/state.valid"
+    local valid_backup="$WORKSPACE/navigation-recovery-data/state.valid"
 
-    create_tmux_root m6-t3-data
+    create_tmux_root navigation-recovery-data
     root="$NEW_TMUX_ROOT"
     export XDG_STATE_HOME="$state_home"
     state_directory=$(runner_state_directory_for "$state_home")
     state_file="$state_directory/state"
-    special_path="$WORKSPACE/m6-t3-data/special"$'\t'"percent%"$'\n'"line"$'\r'
-    malicious_path="$WORKSPACE/m6-t3-data/\$(touch\${IFS}$sentinel)"
+    special_path="$WORKSPACE/navigation-recovery-data/special"$'\t'"percent%"$'\n'"line"$'\r'
+    malicious_path="$WORKSPACE/navigation-recovery-data/\$(touch\${IFS}$sentinel)"
     mkdir -p -- "$home" "$xdg_home" "$valid_path" "$stale_path" \
         "$special_path"
 
-    run_outside_success m6-t3-data-valid "$root" "$home" "$xdg_home" \
+    run_outside_success navigation-recovery-data-valid "$root" "$home" "$xdg_home" \
         "$RUNNER" m6-data-valid create -s m6-data-valid -c "$valid_path"
-    run_outside_success m6-t3-data-stale "$root" "$home" "$xdg_home" \
+    run_outside_success navigation-recovery-data-stale "$root" "$home" "$xdg_home" \
         "$RUNNER" m6-data-stale create -s m6-data-stale -c "$stale_path"
-    run_outside_success m6-t3-data-special "$root" "$home" "$xdg_home" \
+    run_outside_success navigation-recovery-data-special "$root" "$home" "$xdg_home" \
         "$RUNNER" m6-data-special create -s m6-data-special \
         -c "$special_path"
     encoded_special=$(encode_state_field "$special_path")
@@ -5528,28 +5528,28 @@ function exercise_m6_t3_data_failures {
         "state record omitted newline escaping"
 
     snapshot_before=$(state_snapshot "$state_directory")
-    run_outside_failure m6-t3-invalid-recent-args "$root" "$home" \
+    run_outside_failure navigation-recovery-invalid-recent-args "$root" "$home" \
         "$xdg_home" "$RUNNER" recent extra
-    run_outside_failure m6-t3-invalid-last-args "$root" "$home" \
+    run_outside_failure navigation-recovery-invalid-last-args "$root" "$home" \
         "$xdg_home" "$RUNNER" last extra
-    start_state_monitor m6-t3-invalid-recent-number "$root"
-    start_runner_outside m6-t3-invalid-recent-number "$root" "$home" \
+    start_state_monitor navigation-recovery-invalid-recent-number "$root"
+    start_runner_outside navigation-recovery-invalid-recent-number "$root" "$home" \
         "$xdg_home" "$RUNNER" recent
     if ! wait_for_transcript_text "Select recent destination:"; then
         fail_test "invalid recent number case omitted its prompt"
     fi
     send_current_input 'not-a-number\n'
     finish_current_pty
-    stop_state_monitor m6-t3-invalid-recent-number
+    stop_state_monitor navigation-recovery-invalid-recent-number
     assert_last_pty_failed_without_timeout "invalid recent number"
-    run_outside_failure m6-t3-missing-attach "$root" "$home" "$xdg_home" \
+    run_outside_failure navigation-recovery-missing-attach "$root" "$home" "$xdg_home" \
         "$RUNNER" attach m6-missing-target
     snapshot_after=$(state_snapshot "$state_directory")
     assert_equal "$snapshot_before" "$snapshot_after" \
         "invalid commands changed navigation state"
 
     mv -- "$stale_path" "$moved_path"
-    start_runner_outside m6-t3-stale-path "$root" "$home" "$xdg_home" \
+    start_runner_outside navigation-recovery-stale-path "$root" "$home" "$xdg_home" \
         "$RUNNER" recent
     if ! wait_for_transcript_text "Select recent destination:"; then
         fail_test "stale recent path case omitted its prompt"
@@ -5563,7 +5563,7 @@ function exercise_m6_t3_data_failures {
 
     snapshot_before=$(state_snapshot "$state_directory")
     run_tmux "$root" kill-session -t '=m6-data-stale'
-    start_runner_outside m6-t3-stale-last "$root" "$home" "$xdg_home" \
+    start_runner_outside navigation-recovery-stale-last "$root" "$home" "$xdg_home" \
         "$RUNNER" last
     finish_current_pty
     assert_last_pty_failed_without_timeout "stale previous session"
@@ -5583,7 +5583,7 @@ function exercise_m6_t3_data_failures {
         printf 'recent\t997\tunknown\t%s\n' "$malicious_path"
         printf 'session\t996\trelative-server\tmalformed-session\n'
     } >> "$state_file"
-    run_recent_selection_success m6-t3-malformed-valid "$root" "$home" \
+    run_recent_selection_success navigation-recovery-malformed-valid "$root" "$home" \
         "$xdg_home" "$RUNNER" m6-data-special "$special_path"
     if [[ -e "$sentinel" ]]; then
         fail_test "state data executed stored shell syntax"
@@ -5601,7 +5601,7 @@ function exercise_m6_t3_data_failures {
     sed 's/^version\t2$/version\t999/' "$valid_backup" > "$state_file"
     snapshot_before=$(state_snapshot "$state_directory")
     fingerprint_before=$(server_fingerprint "$root")
-    start_runner_outside m6-t3-future-version "$root" "$home" "$xdg_home" \
+    start_runner_outside navigation-recovery-future-version "$root" "$home" "$xdg_home" \
         "$RUNNER" recent
     finish_current_pty
     assert_last_pty_failed_without_timeout "future state version"
@@ -5624,17 +5624,17 @@ function exercise_m6_t3_data_failures {
     unset XDG_STATE_HOME
 }
 
-function exercise_m6_t3_lock_timeout {
+function exercise_navigation_recovery_lock_timeout {
     local root=""
-    local home="$WORKSPACE/m6-t3-lock/home"
-    local xdg_home="$WORKSPACE/m6-t3-lock/xdg"
-    local state_home="$WORKSPACE/m6-t3-lock/state-home"
+    local home="$WORKSPACE/navigation-recovery-lock/home"
+    local xdg_home="$WORKSPACE/navigation-recovery-lock/xdg"
+    local state_home="$WORKSPACE/navigation-recovery-lock/state-home"
     local state_directory=""
     local state_file=""
     local snapshot_before=""
     local socket_path=""
 
-    create_tmux_root m6-t3-lock
+    create_tmux_root navigation-recovery-lock
     root="$NEW_TMUX_ROOT"
     export XDG_STATE_HOME="$state_home"
     state_directory=$(runner_state_directory_for "$state_home")
@@ -5645,8 +5645,8 @@ function exercise_m6_t3_lock_timeout {
     chmod 0600 "$state_file"
     snapshot_before=$(state_snapshot "$state_directory")
 
-    start_state_lock_holder m6-t3-lock "$state_directory"
-    start_runner_outside m6-t3-lock-timeout "$root" "$home" "$xdg_home" \
+    start_state_lock_holder navigation-recovery-lock "$state_directory"
+    start_runner_outside navigation-recovery-lock-timeout "$root" "$home" "$xdg_home" \
         "$RUNNER" recent
     finish_current_pty
     assert_last_pty_failed_without_timeout "state lock timeout"
@@ -5657,7 +5657,7 @@ function exercise_m6_t3_lock_timeout {
         "state lock timeout connected to or started tmux"
     assert_equal "$snapshot_before" "$(state_snapshot "$state_directory")" \
         "state lock timeout changed state"
-    start_runner_outside m6-t3-list-lock-timeout "$root" "$home" \
+    start_runner_outside navigation-recovery-list-lock-timeout "$root" "$home" \
         "$xdg_home" "$RUNNER" ls
     finish_current_pty
     assert_last_pty_failed_without_timeout "list state lock timeout"
@@ -5666,22 +5666,22 @@ function exercise_m6_t3_lock_timeout {
         "list connected to tmux before acquiring the state lock"
     assert_equal "$snapshot_before" "$(state_snapshot "$state_directory")" \
         "list lock timeout changed state"
-    stop_state_lock_holder m6-t3-lock
+    stop_state_lock_holder navigation-recovery-lock
     unset XDG_STATE_HOME
 }
 
-function exercise_m6_t3_post_handoff_lock {
+function exercise_navigation_recovery_post_handoff_lock {
     local root=""
-    local home="$WORKSPACE/m6-t3-post-lock/home"
-    local xdg_home="$WORKSPACE/m6-t3-post-lock/xdg"
-    local state_home="$WORKSPACE/m6-t3-post-lock/state-home"
+    local home="$WORKSPACE/navigation-recovery-post-lock/home"
+    local xdg_home="$WORKSPACE/navigation-recovery-post-lock/xdg"
+    local state_home="$WORKSPACE/navigation-recovery-post-lock/state-home"
     local state_directory=""
     local state_file=""
-    local session_path="$WORKSPACE/m6-t3-post-lock/path"
+    local session_path="$WORKSPACE/navigation-recovery-post-lock/path"
     local pending_file=""
     local ack_file=""
 
-    create_tmux_root m6-t3-post-lock
+    create_tmux_root navigation-recovery-post-lock
     root="$NEW_TMUX_ROOT"
     export XDG_STATE_HOME="$state_home"
     state_directory=$(runner_state_directory_for "$state_home")
@@ -5691,14 +5691,14 @@ function exercise_m6_t3_post_handoff_lock {
     run_tmux "$root" set-option -t '=m6-post-lock:' \
         @tmux-runner-path "$session_path"
 
-    start_gated_runner_outside m6-t3-post-lock "$root" "$home" \
+    start_gated_runner_outside navigation-recovery-post-lock "$root" "$home" \
         "$xdg_home" "$RUNNER" m6-post-lock attach m6-post-lock
     if ! wait_for_pending_file "$state_directory"; then
         fail_test "post-handoff lock case did not publish a pending record"
     fi
     pending_file="$LAST_PENDING_FILE"
     ack_file=$(acknowledged_record_for_pending "$pending_file")
-    start_state_lock_holder m6-t3-post-lock "$state_directory"
+    start_state_lock_holder navigation-recovery-post-lock "$state_directory"
     release_attach_gate
     if ! wait_for_pending_ack "$pending_file"; then
         fail_test "post-handoff lock blocked acknowledgment publication"
@@ -5709,7 +5709,7 @@ function exercise_m6_t3_post_handoff_lock {
     if ! kill -0 "$CURRENT_PTY_PID" 2>/dev/null; then
         fail_test "post-handoff lock ended the attached runner"
     fi
-    stop_state_lock_holder m6-t3-post-lock
+    stop_state_lock_holder navigation-recovery-post-lock
     if ! wait_for_first_state_value "$state_file" session \
         "$(encode_state_field m6-post-lock)"; then
         fail_test "post-handoff acknowledgment was not reconciled"
@@ -5726,32 +5726,32 @@ function exercise_m6_t3_post_handoff_lock {
     unset XDG_STATE_HOME
 }
 
-function exercise_m6_t3_transactions {
+function exercise_navigation_recovery_transactions {
     local root=""
-    local home="$WORKSPACE/m6-t3-transactions/home"
-    local xdg_home="$WORKSPACE/m6-t3-transactions/xdg"
-    local sentinel="$WORKSPACE/m6-t3-transactions/shell-evaluated"
+    local home="$WORKSPACE/navigation-recovery-transactions/home"
+    local xdg_home="$WORKSPACE/navigation-recovery-transactions/xdg"
+    local sentinel="$WORKSPACE/navigation-recovery-transactions/shell-evaluated"
     local state_home=""
     local state_directory=""
     local state_file=""
-    local path_a="$WORKSPACE/m6-t3-transactions/path-a"
-    local path_b="$WORKSPACE/m6-t3-transactions/path-b"
-    local path_c="$WORKSPACE/m6-t3-transactions/path-c"
+    local path_a="$WORKSPACE/navigation-recovery-transactions/path-a"
+    local path_b="$WORKSPACE/navigation-recovery-transactions/path-b"
+    local path_c="$WORKSPACE/navigation-recovery-transactions/path-c"
     local pending_file=""
     local ack_file=""
     local digest_before=""
     local snapshot_before=""
     local expected_recent=""
 
-    create_tmux_root m6-t3-transactions
+    create_tmux_root navigation-recovery-transactions
     root="$NEW_TMUX_ROOT"
-    state_home="$WORKSPACE/m6-t3-transactions/state ' #{session_name} % \$(touch\${IFS}$sentinel)"
+    state_home="$WORKSPACE/navigation-recovery-transactions/state ' #{session_name} % \$(touch\${IFS}$sentinel)"
     export XDG_STATE_HOME="$state_home"
     state_directory=$(runner_state_directory_for "$state_home")
     state_file="$state_directory/state"
     mkdir -p -- "$home" "$xdg_home" "$path_a" "$path_b" "$path_c"
 
-    run_outside_success m6-t3-transaction-seed "$root" "$home" \
+    run_outside_success navigation-recovery-transaction-seed "$root" "$home" \
         "$xdg_home" "$RUNNER" m6-tx-a create -s m6-tx-a -c "$path_a"
     run_tmux "$root" new-session -d -s m6-tx-b -c "$path_b"
     run_tmux "$root" set-option -t '=m6-tx-b:' \
@@ -5760,7 +5760,7 @@ function exercise_m6_t3_transactions {
     run_tmux "$root" set-option -t '=m6-tx-c:' \
         @tmux-runner-path "$path_c"
 
-    start_gated_runner_outside m6-t3-unack-interleave "$root" "$home" \
+    start_gated_runner_outside navigation-recovery-unack-interleave "$root" "$home" \
         "$xdg_home" "$RUNNER" m6-tx-b attach m6-tx-b
     if ! wait_for_pending_file "$state_directory"; then
         fail_test "unacknowledged attach did not publish a pending record"
@@ -5768,7 +5768,7 @@ function exercise_m6_t3_transactions {
     pending_file="$LAST_PENDING_FILE"
     assert_versioned_transaction_record "$pending_file" \
         "unacknowledged interleaved pending transaction"
-    run_extra_outside_success m6-t3-interleaved-success "$root" "$home" \
+    run_extra_outside_success navigation-recovery-interleaved-success "$root" "$home" \
         "$xdg_home" "$RUNNER" m6-tx-c attach m6-tx-c
     run_tmux "$root" kill-session -t '=m6-tx-b'
     release_attach_gate
@@ -5795,7 +5795,7 @@ function exercise_m6_t3_transactions {
         @tmux-runner-path "$path_b"
     digest_before=$(sha256sum "$state_file")
     digest_before="${digest_before%% *}"
-    start_gated_runner_outside m6-t3-unack-orphan "$root" "$home" \
+    start_gated_runner_outside navigation-recovery-unack-orphan "$root" "$home" \
         "$xdg_home" "$RUNNER" m6-tx-b attach m6-tx-b
     if ! wait_for_pending_file "$state_directory"; then
         fail_test "unacknowledged orphan did not publish a pending record"
@@ -5808,7 +5808,7 @@ function exercise_m6_t3_transactions {
     if [[ -e "$ack_file" ]]; then
         fail_test "pre-attach runner death produced an acknowledgment"
     fi
-    start_runner_outside m6-t3-unack-reconcile "$root" "$home" \
+    start_runner_outside navigation-recovery-unack-reconcile "$root" "$home" \
         "$xdg_home" "$RUNNER" recent
     if ! wait_for_transcript_text "Select recent destination:"; then
         fail_test "unacknowledged orphan reconciliation omitted recent"
@@ -5825,7 +5825,7 @@ function exercise_m6_t3_transactions {
         "unacknowledged orphan changed committed state"
     assert_no_state_transactions "$state_directory"
 
-    start_gated_runner_outside m6-t3-ack-orphan "$root" "$home" \
+    start_gated_runner_outside navigation-recovery-ack-orphan "$root" "$home" \
         "$xdg_home" "$RUNNER" m6-tx-b attach m6-tx-b
     if ! wait_for_pending_file "$state_directory"; then
         fail_test "acknowledged orphan did not publish a pending record"
@@ -5833,11 +5833,11 @@ function exercise_m6_t3_transactions {
     pending_file="$LAST_PENDING_FILE"
     assert_versioned_transaction_record "$pending_file" \
         "acknowledged orphan pending transaction"
-    crash_current_pty_after_acknowledgment m6-t3-ack-orphan \
+    crash_current_pty_after_acknowledgment navigation-recovery-ack-orphan \
         "$pending_file"
     assert_no_session_entry_hooks "$root" \
         "acknowledged runner death left a temporary entry hook"
-    start_runner_outside m6-t3-ack-reconcile "$root" "$home" \
+    start_runner_outside navigation-recovery-ack-reconcile "$root" "$home" \
         "$xdg_home" "$RUNNER" recent
     if ! wait_for_transcript_text "Select recent destination:"; then
         fail_test "acknowledged orphan reconciliation omitted recent"
@@ -5857,7 +5857,7 @@ function exercise_m6_t3_transactions {
         "acknowledged orphan path was not committed"
     assert_no_state_transactions "$state_directory"
 
-    start_runner_outside m6-t3-ack-abnormal "$root" "$home" \
+    start_runner_outside navigation-recovery-ack-abnormal "$root" "$home" \
         "$xdg_home" "$RUNNER" attach m6-tx-c
     if ! wait_for_client_session "$root" m6-tx-c; then
         fail_test "acknowledged abnormal case did not attach a live client"
@@ -5970,7 +5970,7 @@ function exercise_strict_pending_rejection {
     local xdg_home="$3"
     local state_directory="$4"
     local corruption="$5"
-    local label="m6-t3-strict-pending-$corruption"
+    local label="navigation-recovery-strict-pending-$corruption"
     local pending_file=""
     local snapshot_before=""
 
@@ -6005,7 +6005,7 @@ function exercise_strict_ack_rejection {
     local xdg_home="$3"
     local state_directory="$4"
     local corruption="$5"
-    local label="m6-t3-strict-ack-$corruption"
+    local label="navigation-recovery-strict-ack-$corruption"
     local pending_file=""
     local ack_file=""
     local snapshot_before=""
@@ -6038,25 +6038,25 @@ function exercise_strict_ack_rejection {
     assert_no_state_transactions "$state_directory"
 }
 
-function exercise_m6_t3_strict_transactions {
+function exercise_navigation_recovery_strict_transactions {
     local root=""
-    local home="$WORKSPACE/m6-t3-strict/home"
-    local xdg_home="$WORKSPACE/m6-t3-strict/xdg"
-    local state_home="$WORKSPACE/m6-t3-strict/state-home"
+    local home="$WORKSPACE/navigation-recovery-strict/home"
+    local xdg_home="$WORKSPACE/navigation-recovery-strict/xdg"
+    local state_home="$WORKSPACE/navigation-recovery-strict/state-home"
     local state_directory=""
-    local seed_path="$WORKSPACE/m6-t3-strict/seed"
-    local pending_path="$WORKSPACE/m6-t3-strict/pending"
-    local ack_path="$WORKSPACE/m6-t3-strict/ack"
+    local seed_path="$WORKSPACE/navigation-recovery-strict/seed"
+    local pending_path="$WORKSPACE/navigation-recovery-strict/pending"
+    local ack_path="$WORKSPACE/navigation-recovery-strict/ack"
     local corruption=""
     local -a corruptions=(missing duplicate unknown raw-tab)
 
-    create_tmux_root m6-t3-strict
+    create_tmux_root navigation-recovery-strict
     root="$NEW_TMUX_ROOT"
     export XDG_STATE_HOME="$state_home"
     state_directory=$(runner_state_directory_for "$state_home")
     mkdir -p -- "$home" "$xdg_home" "$seed_path" "$pending_path" \
         "$ack_path"
-    run_outside_success m6-t3-strict-seed "$root" "$home" "$xdg_home" \
+    run_outside_success navigation-recovery-strict-seed "$root" "$home" "$xdg_home" \
         "$RUNNER" m6-strict-seed create -s m6-strict-seed -c "$seed_path"
     run_tmux "$root" new-session -d -s m6-strict-pending -c "$pending_path"
     run_tmux "$root" set-option -t '=m6-strict-pending:' \
@@ -6074,32 +6074,32 @@ function exercise_m6_t3_strict_transactions {
     unset XDG_STATE_HOME
 }
 
-function test_m6_t3_state_failures_and_recovery {
-    exercise_m6_t3_data_failures
-    exercise_m6_t3_lock_timeout
-    exercise_m6_t3_post_handoff_lock
-    exercise_m6_t3_transactions
-    exercise_m6_t3_strict_transactions
-    pass_test M6-T3 \
+function test_navigation_recovery {
+    exercise_navigation_recovery_data_failures
+    exercise_navigation_recovery_lock_timeout
+    exercise_navigation_recovery_post_handoff_lock
+    exercise_navigation_recovery_transactions
+    exercise_navigation_recovery_strict_transactions
+    pass_test NAVIGATION-RECOVERY \
         "state failures, acknowledgment ordering, rollback, and orphan recovery"
 }
 
-function test_m6_t4_concurrent_state {
+function test_navigation_concurrency {
     local root=""
-    local home="$WORKSPACE/m6-t4/home"
-    local xdg_home="$WORKSPACE/m6-t4/xdg"
-    local state_home="$WORKSPACE/m6-t4/state-home"
+    local home="$WORKSPACE/navigation-concurrency/home"
+    local xdg_home="$WORKSPACE/navigation-concurrency/xdg"
+    local state_home="$WORKSPACE/navigation-concurrency/state-home"
     local state_directory=""
     local state_file=""
-    local concurrent_root="$WORKSPACE/m6-t4/concurrent"
-    local overflow_root="$WORKSPACE/m6-t4/overflow"
+    local concurrent_root="$WORKSPACE/navigation-concurrency/concurrent"
+    local overflow_root="$WORKSPACE/navigation-concurrency/overflow"
     local session_name=""
     local path=""
     local suffix=""
     local expected_paths=""
     local actual_paths=""
     local expected_sessions=""
-    local noncanonical_state="$WORKSPACE/m6-t4/noncanonical-state"
+    local noncanonical_state="$WORKSPACE/navigation-concurrency/noncanonical-state"
     local index=0
     local hook_name=""
     local target_id=""
@@ -6108,7 +6108,7 @@ function test_m6_t4_concurrent_state {
     local -a overflow_paths=()
     local -A entry_hook_names=()
 
-    create_tmux_root m6-t4
+    create_tmux_root navigation-concurrency
     root="$NEW_TMUX_ROOT"
     export XDG_STATE_HOME="$state_home"
     state_directory=$(runner_state_directory_for "$state_home")
@@ -6132,9 +6132,9 @@ function test_m6_t4_concurrent_state {
             @tmux-runner-path "$path"
     done
 
-    start_state_record_monitor m6-t4 "$root" "$home" "$xdg_home" \
+    start_state_record_monitor navigation-concurrency "$root" "$home" "$xdg_home" \
         "$state_home"
-    start_concurrent_state_entries m6-t4 "$root" "$home" "$xdg_home" \
+    start_concurrent_state_entries navigation-concurrency "$root" "$home" "$xdg_home" \
         "$RUNNER" "${concurrent_sessions[@]}"
     if ! wait_for_state_row_count "$state_file" recent 8; then
         fail_test "concurrent updates did not retain every successful path"
@@ -6153,10 +6153,10 @@ function test_m6_t4_concurrent_state {
     actual_paths=$(state_record_values recent "$state_file" | LC_ALL=C sort)
     assert_equal "$expected_paths" "$actual_paths" \
         "concurrent updates lost or duplicated a recent path"
-    finish_concurrent_state_entries m6-t4 "$root"
+    finish_concurrent_state_entries navigation-concurrency "$root"
     for ((index = 1; index <= ${#concurrent_sessions[@]}; index++)); do
         if ! hook_name=$(entry_hook_name_from_trace \
-                "$WORKSPACE/pty/m6-t4-$index.typescript"); then
+                "$WORKSPACE/pty/navigation-concurrency-$index.typescript"); then
             fail_test "concurrent entry omitted its transaction hook"
         fi
         if [[ -n "${entry_hook_names[$hook_name]:-}" ]]; then
@@ -6166,10 +6166,10 @@ function test_m6_t4_concurrent_state {
         target_id=$(session_id "$root" \
             "${concurrent_sessions[index - 1]}")
         assert_entry_command_targets_id \
-            "$WORKSPACE/pty/m6-t4-$index.typescript" "$target_id" \
+            "$WORKSPACE/pty/navigation-concurrency-$index.typescript" "$target_id" \
             "concurrent entry did not target its resolved session ID"
         assert_session_entry_hook_trace \
-            "$WORKSPACE/pty/m6-t4-$index.typescript" "$root" \
+            "$WORKSPACE/pty/navigation-concurrency-$index.typescript" "$root" \
             "concurrent entry hook did not match or clean its transaction"
     done
 
@@ -6178,7 +6178,7 @@ function test_m6_t4_concurrent_state {
         path="$overflow_root/path-$suffix"
         overflow_paths+=("$path")
         mkdir -p -- "$path"
-        run_outside_success "m6-t4-overflow-$suffix" "$root" "$home" \
+        run_outside_success "navigation-concurrency-overflow-$suffix" "$root" "$home" \
             "$xdg_home" "$RUNNER" "m6-overflow-$suffix" create \
             -s "m6-overflow-$suffix" -c "$path"
     done
@@ -6190,7 +6190,7 @@ function test_m6_t4_concurrent_state {
         expected_paths+="$(encode_state_field "${overflow_paths[$index]}")"
     done
     actual_paths=$(state_record_values recent "$state_file")
-    stop_state_record_monitor m6-t4
+    stop_state_record_monitor navigation-concurrency
     assert_equal "$expected_paths" "$actual_paths" \
         "ordered overflow did not retain exactly the newest 20 paths"
     expected_sessions=$(printf '%s\n%s\n' \
@@ -6205,34 +6205,34 @@ function test_m6_t4_concurrent_state {
     assert_state_modes "$state_directory"
     assert_no_state_transactions "$state_directory"
     unset XDG_STATE_HOME
-    exercise_m6_t4_ack_ticket_aba
-    pass_test M6-T4 \
+    exercise_navigation_concurrency_ack_ticket_aba
+    pass_test NAVIGATION-CONCURRENCY \
         "concurrent updates, acknowledgment tickets, and ordered overflow"
 }
 
-function test_m6_t5_interface_regression {
+function test_navigation_regression {
     local root=""
     local home="$WORKSPACE/t6/home with space"
     local xdg_home="$WORKSPACE/t6/xdg config with space"
     local installed_runner="$home/.local/bin/tmux-runner"
     local state_directory="$home/.local/state/tmux-runner"
-    local path="$WORKSPACE/m6-t5/installed-path"
+    local path="$WORKSPACE/navigation-regression/installed-path"
     local debris=""
 
-    create_tmux_root m6-t5
+    create_tmux_root navigation-regression
     root="$NEW_TMUX_ROOT"
     unset XDG_STATE_HOME || true
     mkdir -p -- "$path"
-    run_outside_success m6-t5-installed-create "$root" "$home" \
+    run_outside_success navigation-regression-installed-create "$root" "$home" \
         "$xdg_home" "$installed_runner" m6-installed-path create \
         -s m6-installed-path -c "$path"
-    run_recent_selection_success m6-t5-installed-recent "$root" "$home" \
+    run_recent_selection_success navigation-regression-installed-recent "$root" "$home" \
         "$xdg_home" "$installed_runner" m6-installed-path "$path"
     run_tmux "$root" new-session -d -s m6-installed-second
-    run_outside_success m6-t5-installed-attach "$root" "$home" \
+    run_outside_success navigation-regression-installed-attach "$root" "$home" \
         "$xdg_home" "$installed_runner" m6-installed-second \
         attach m6-installed-second
-    run_outside_success m6-t5-installed-last "$root" "$home" \
+    run_outside_success navigation-regression-installed-last "$root" "$home" \
         "$xdg_home" "$installed_runner" m6-installed-path last
 
     assert_state_modes "$state_directory"
@@ -6259,7 +6259,7 @@ function test_m6_t5_interface_regression {
         -o -name '.state.tmp.*' \) -print)
     assert_equal "" "$debris" \
         "regression run left a state transaction or temporary record"
-    pass_test M6-T5 \
+    pass_test NAVIGATION-REGRESSION \
         "installed navigation, interface, documentation, and cleanup regression"
 }
 
@@ -6273,7 +6273,7 @@ function create_legacy_marked_session {
         @tmux-runner-path "$session_path"
 }
 
-function finish_m7_outside_identity_failure {
+function finish_entry_outside_identity_failure {
     local label="$1"
     local root="$2"
     local state_directory="$3"
@@ -6311,14 +6311,14 @@ function finish_m7_outside_identity_failure {
         "$label left a temporary entry hook"
 }
 
-function exercise_m7_unmarked_marker_normalization {
+function exercise_entry_unmarked_marker_normalization {
     local root="$1"
     local home="$2"
     local xdg_home="$3"
     local state_directory="$4"
     local conflict_path="$5"
     local state_file="$state_directory/state"
-    local session_name="m7-unmarked"
+    local session_name="entry-unmarked"
     local target_id=""
     local pending_file=""
     local ack_file=""
@@ -6327,7 +6327,7 @@ function exercise_m7_unmarked_marker_normalization {
 
     run_tmux "$root" -f /dev/null new-session -d -s "$session_name"
     target_id=$(session_id "$root" "$session_name")
-    start_entry_gated_runner_outside m7-unmarked-normalize "$root" \
+    start_entry_gated_runner_outside entry-unmarked-normalize "$root" \
         "$home" "$xdg_home" "$RUNNER" set-option attach "$session_name"
     if ! wait_for_file "$ENTRY_GATE_READY"; then
         fail_test "unmarked normalization did not reach its barrier"
@@ -6352,14 +6352,14 @@ function exercise_m7_unmarked_marker_normalization {
     assert_equal "" "$(state_record_values recent "$state_file")" \
         "reserved unmarked normalization created a recent path"
     assert_no_state_transactions "$state_directory"
-    run_outside_failure m7-unmarked-explicit-conflict "$root" "$home" \
+    run_outside_failure entry-unmarked-explicit-conflict "$root" "$home" \
         "$xdg_home" "$RUNNER" create -s "$session_name" -c "$conflict_path"
     assert_contains "$LAST_TRANSCRIPT" \
         "session $session_name exists without @tmux-runner-path" \
         "reserved unmarked session did not retain direct-attach guidance"
 
     snapshot_before=$(state_snapshot "$state_directory")
-    start_entry_gated_runner_outside m7-unmarked-disappear "$root" \
+    start_entry_gated_runner_outside entry-unmarked-disappear "$root" \
         "$home" "$xdg_home" "$RUNNER" if-shell attach "$session_name"
     if ! wait_for_file "$ENTRY_GATE_READY" || \
         ! wait_for_pending_file "$state_directory"; then
@@ -6376,7 +6376,7 @@ function exercise_m7_unmarked_marker_normalization {
     after_set_option_hook+="$SESSION_PATH_UNMARKED_MARKER"
     run_tmux "$root" set-hook -g after-set-option \
         "$after_set_option_hook"
-    finish_m7_outside_identity_failure m7-unmarked-disappear "$root" \
+    finish_entry_outside_identity_failure entry-unmarked-disappear "$root" \
         "$state_directory" "$snapshot_before" "$ack_file"
     assert_contains "$LAST_TRANSCRIPT" \
         "session entry was not acknowledged: $session_name" \
@@ -6395,7 +6395,7 @@ function exercise_m7_unmarked_marker_normalization {
     run_tmux "$root" set-hook -gu after-set-option
 }
 
-function exercise_m7_outside_identity_guard {
+function exercise_entry_outside_identity_guard {
     local label="$1"
     local root="$2"
     local home="$3"
@@ -6476,7 +6476,7 @@ function exercise_m7_outside_identity_guard {
             fail_test "$label has an unknown identity mutation"
             ;;
     esac
-    finish_m7_outside_identity_failure "$label" "$root" \
+    finish_entry_outside_identity_failure "$label" "$root" \
         "$state_directory" "$snapshot_before" "$ack_file"
     if [[ "$mutation" != "replace" ]]; then
         assert_contains "$LAST_TRANSCRIPT" \
@@ -6485,13 +6485,13 @@ function exercise_m7_outside_identity_guard {
     fi
 }
 
-function exercise_m7_inside_id_replacement {
+function exercise_entry_inside_id_replacement {
     local root="$1"
     local home="$2"
     local xdg_home="$3"
     local state_directory="$4"
-    local source_session="m7-id-inside-source"
-    local target_session="m7-id-inside-target"
+    local source_session="entry-id-inside-source"
+    local target_session="entry-id-inside-target"
     local session_path="$5"
     local old_id=""
     local new_id=""
@@ -6504,15 +6504,15 @@ function exercise_m7_inside_id_replacement {
 
     create_legacy_marked_session "$root" "$source_session" "$session_path"
     create_legacy_marked_session "$root" "$target_session" "$session_path"
-    run_outside_success m7-id-inside-seed "$root" "$home" "$xdg_home" \
+    run_outside_success entry-id-inside-seed "$root" "$home" "$xdg_home" \
         "$RUNNER" "$target_session" attach "$target_session"
     old_id=$(session_id "$root" "$target_session")
     old_marker=$(raw_session_path_marker "$root" "$target_session")
     snapshot_before=$(state_snapshot "$state_directory")
 
-    start_source_client m7-id-inside "$root" "$home" "$xdg_home" \
+    start_source_client entry-id-inside "$root" "$home" "$xdg_home" \
         "$source_session"
-    invoke_runner_inside_entry_gated m7-id-inside "$root" "$home" \
+    invoke_runner_inside_entry_gated entry-id-inside "$root" "$home" \
         "$xdg_home" "$source_session" "$RUNNER" attach "$target_session"
     if ! wait_for_file "$ENTRY_GATE_READY" || \
         ! wait_for_pending_file "$state_directory"; then
@@ -6529,16 +6529,16 @@ function exercise_m7_inside_id_replacement {
         "$(raw_session_path_marker "$root" "$target_session")" \
         "inside replacement changed the raw marker"
 
-    start_state_lock_holder m7-id-inside-ack "$state_directory"
+    start_state_lock_holder entry-id-inside-ack "$state_directory"
     release_entry_gate
     if ! wait_for_file "$ENTRY_GATE_DONE"; then
-        stop_state_lock_holder m7-id-inside-ack
+        stop_state_lock_holder entry-id-inside-ack
         fail_test "inside ID replacement tmux call did not finish"
     fi
     if [[ -e "$ack_file" ]]; then
         acknowledgment_observed=1
     fi
-    stop_state_lock_holder m7-id-inside-ack
+    stop_state_lock_holder entry-id-inside-ack
     if (( acknowledgment_observed )); then
         fail_test "inside ID replacement published an acknowledgment"
     fi
@@ -6565,7 +6565,7 @@ function exercise_m7_inside_id_replacement {
     assert_last_pty_succeeded "inside ID replacement source client failed"
 }
 
-function exercise_m7_special_marker_positive {
+function exercise_entry_special_marker_positive {
     local root="$1"
     local home="$2"
     local xdg_home="$3"
@@ -6615,20 +6615,20 @@ function exercise_m7_special_marker_positive {
     assert_no_state_transactions "$state_directory"
 }
 
-function exercise_m7_session_identity {
+function exercise_entry_session_identity {
     local root=""
-    local home="$WORKSPACE/m7-identity/home"
-    local xdg_home="$WORKSPACE/m7-identity/config"
-    local state_home="$WORKSPACE/m7-identity/state-home"
+    local home="$WORKSPACE/entry-identity/home"
+    local xdg_home="$WORKSPACE/entry-identity/config"
+    local state_home="$WORKSPACE/entry-identity/state-home"
     local state_directory=""
-    local special_path="$WORKSPACE/m7-identity/path-#,};'"
-    local replace_path="$WORKSPACE/m7-identity/replace-#,}"
-    local marker_path="$WORKSPACE/m7-identity/marker-#,}"
-    local rename_path="$WORKSPACE/m7-identity/rename-#,}"
-    local inside_path="$WORKSPACE/m7-identity/inside-#,}"
-    local unmarked_conflict_path="$WORKSPACE/m7-identity/unmarked-conflict"
+    local special_path="$WORKSPACE/entry-identity/path-#,};'"
+    local replace_path="$WORKSPACE/entry-identity/replace-#,}"
+    local marker_path="$WORKSPACE/entry-identity/marker-#,}"
+    local rename_path="$WORKSPACE/entry-identity/rename-#,}"
+    local inside_path="$WORKSPACE/entry-identity/inside-#,}"
+    local unmarked_conflict_path="$WORKSPACE/entry-identity/unmarked-conflict"
 
-    create_tmux_root m7-identity
+    create_tmux_root entry-identity
     root="$NEW_TMUX_ROOT"
     export XDG_STATE_HOME="$state_home"
     state_directory=$(runner_state_directory_for "$state_home")
@@ -6636,43 +6636,43 @@ function exercise_m7_session_identity {
         "$marker_path" "$rename_path" "$inside_path" \
         "$unmarked_conflict_path"
 
-    exercise_m7_unmarked_marker_normalization "$root" "$home" \
+    exercise_entry_unmarked_marker_normalization "$root" "$home" \
         "$xdg_home" "$state_directory" "$unmarked_conflict_path"
 
     create_legacy_marked_session "$root" m7-special "$special_path"
     run_tmux "$root" new-session -d -s m7-special-source
-    exercise_m7_special_marker_positive "$root" "$home" "$xdg_home" \
+    exercise_entry_special_marker_positive "$root" "$home" "$xdg_home" \
         "$state_directory"
 
-    exercise_m7_outside_identity_guard m7-id-replace "$root" "$home" \
-        "$xdg_home" "$state_directory" m7-id-replace "$replace_path" \
+    exercise_entry_outside_identity_guard entry-id-replace "$root" "$home" \
+        "$xdg_home" "$state_directory" entry-id-replace "$replace_path" \
         replace
-    exercise_m7_outside_identity_guard m7-marker-change "$root" "$home" \
-        "$xdg_home" "$state_directory" m7-marker-change "$marker_path" \
+    exercise_entry_outside_identity_guard entry-marker-change "$root" "$home" \
+        "$xdg_home" "$state_directory" entry-marker-change "$marker_path" \
         marker
-    exercise_m7_outside_identity_guard m7-name-change "$root" "$home" \
-        "$xdg_home" "$state_directory" m7-name-change "$rename_path" \
+    exercise_entry_outside_identity_guard entry-name-change "$root" "$home" \
+        "$xdg_home" "$state_directory" entry-name-change "$rename_path" \
         rename
-    exercise_m7_inside_id_replacement "$root" "$home" "$xdg_home" \
+    exercise_entry_inside_id_replacement "$root" "$home" "$xdg_home" \
         "$state_directory" "$inside_path"
     assert_no_state_transactions "$state_directory"
     unset XDG_STATE_HOME
 }
 
-function test_m7_t1_installation {
+function test_installation_bundle {
     local root=""
-    local home="$WORKSPACE/m7-t1/home with space"
-    local xdg_home="$WORKSPACE/m7-t1/config home with space"
+    local home="$WORKSPACE/installation-bundle/home with space"
+    local xdg_home="$WORKSPACE/installation-bundle/config home with space"
     local installed_runner="$home/.local/bin/tmux-runner"
     local installed_completion="$home/.local/share/bash-completion/completions/tmux-runner"
     local installed_config="$xdg_home/tmux-runner/tmux.conf"
-    local preserved_config="$WORKSPACE/m7-t1/preserved-tmux.conf"
-    local session_path="$WORKSPACE/m7-t1/session path"
+    local preserved_config="$WORKSPACE/installation-bundle/preserved-tmux.conf"
+    local session_path="$WORKSPACE/installation-bundle/session path"
     local state_directory="$home/.local/state/tmux-runner"
-    local ambient_repository="$WORKSPACE/m7-t1/ambient-repository"
-    local no_git_source="$WORKSPACE/m7-t1/no-git-source"
-    local unrelated_home="$WORKSPACE/m7-t1/unrelated-home"
-    local no_git_xdg="$WORKSPACE/m7-t1/no-git-config"
+    local ambient_repository="$WORKSPACE/installation-bundle/ambient-repository"
+    local no_git_source="$WORKSPACE/installation-bundle/no-git-source"
+    local unrelated_home="$WORKSPACE/installation-bundle/unrelated-home"
+    local no_git_xdg="$WORKSPACE/installation-bundle/no-git-config"
     local no_git_runner="$unrelated_home/.local/bin/tmux-runner"
     local no_git_version=""
     local no_git_install_date=""
@@ -6685,11 +6685,11 @@ function test_m7_t1_installation {
     local socket_file=""
 
     unset XDG_STATE_HOME || true
-    create_tmux_root m7-t1
+    create_tmux_root installation-bundle
     root="$NEW_TMUX_ROOT"
     mkdir -p -- "$home" "$xdg_home" "$session_path"
     init_git_repository "$ambient_repository"
-    assert_command_succeeds "M7-T1 make install failed" \
+    assert_command_succeeds "INSTALLATION-BUNDLE make install failed" \
         env GIT_DIR="$ambient_repository/.git" \
         GIT_WORK_TREE="$ambient_repository" XDG_CONFIG_HOME="$xdg_home" \
         make -C "$REPO_ROOT" HOME="$home" install
@@ -6700,23 +6700,23 @@ function test_m7_t1_installation {
         "$installed_runner" "$installed_completion" "$installed_config" | \
         LC_ALL=C sort)
     assert_equal "$expected_inventory" "$inventory" \
-        "M7-T1 install inventory is wrong"
+        "INSTALLATION-BUNDLE install inventory is wrong"
     assert_equal "0755" "0$(stat -c '%a' "$installed_runner")" \
-        "M7-T1 installed runner mode is wrong"
+        "INSTALLATION-BUNDLE installed runner mode is wrong"
     assert_equal "0644" "0$(stat -c '%a' "$installed_completion")" \
-        "M7-T1 installed completion mode is wrong"
+        "INSTALLATION-BUNDLE installed completion mode is wrong"
     assert_equal "0644" "0$(stat -c '%a' "$installed_config")" \
-        "M7-T1 installed config mode is wrong"
-    assert_command_succeeds "M7-T1 initial config differs from source" \
+        "INSTALLATION-BUNDLE installed config mode is wrong"
+    assert_command_succeeds "INSTALLATION-BUNDLE initial config differs from source" \
         cmp -s "$RUNNER_CONFIG" "$installed_config"
 
     printf '%s\n' 'set -g @tmux-runner-m7-config loaded' > "$installed_config"
     cp "$installed_config" "$preserved_config"
-    assert_command_succeeds "M7-T1 second make install failed" \
+    assert_command_succeeds "INSTALLATION-BUNDLE second make install failed" \
         env GIT_DIR="$ambient_repository/.git" \
         GIT_WORK_TREE="$ambient_repository" XDG_CONFIG_HOME="$xdg_home" \
         make -C "$REPO_ROOT" HOME="$home" install
-    assert_command_succeeds "M7-T1 second install changed local config" \
+    assert_command_succeeds "INSTALLATION-BUNDLE second install changed local config" \
         cmp -s "$preserved_config" "$installed_config"
 
     mkdir -p -- "$no_git_source" "$no_git_xdg"
@@ -6725,12 +6725,12 @@ function test_m7_t1_installation {
         "$REPO_ROOT/configure" "$no_git_source/"
     if git -C "$no_git_source" rev-parse --is-inside-work-tree \
             >/dev/null 2>&1; then
-        fail_test "M7-T1 plain source copy unexpectedly has Git identity"
+        fail_test "INSTALLATION-BUNDLE plain source copy unexpectedly has Git identity"
     fi
     init_git_repository "$unrelated_home"
     unrelated_hash=$(git -C "$unrelated_home" rev-parse --short HEAD)
     install_before=$(date -u '+%s')
-    assert_command_succeeds "M7-T1 no-Git source install failed" \
+    assert_command_succeeds "INSTALLATION-BUNDLE no-Git source install failed" \
         env GIT_DIR="$unrelated_home/.git" \
         GIT_WORK_TREE="$unrelated_home" XDG_CONFIG_HOME="$no_git_xdg" \
         make -C "$no_git_source" HOME="$unrelated_home" install
@@ -6739,51 +6739,51 @@ function test_m7_t1_installation {
         "$no_git_runner" --version)
     assert_equal "tmux-runner version 0.1.0 (unknown)" \
         "${no_git_version%%$'\n'*}" \
-        "M7-T1 no-Git installation adopted another repository"
+        "INSTALLATION-BUNDLE no-Git installation adopted another repository"
     assert_equal "unknown" \
         "$(printf '%s\n' "$no_git_version" | \
             sed -n 's/^commit date:  //p')" \
-        "M7-T1 no-Git installation reported a commit date"
+        "INSTALLATION-BUNDLE no-Git installation reported a commit date"
     no_git_install_date=$(printf '%s\n' "$no_git_version" | \
         sed -n 's/^install date: //p')
     if [[ ! "$no_git_install_date" =~ \
         ^[0-9]{4}-[0-9]{2}-[0-9]{2}T[0-9]{2}:[0-9]{2}:[0-9]{2}Z$ ]]; then
-        fail_test "M7-T1 no-Git installation date is not UTC"
+        fail_test "INSTALLATION-BUNDLE no-Git installation date is not UTC"
     fi
     if ! no_git_install_epoch=$(date -u -d "$no_git_install_date" '+%s'); then
-        fail_test "M7-T1 no-Git installation date is not parseable UTC"
+        fail_test "INSTALLATION-BUNDLE no-Git installation date is not parseable UTC"
     fi
     if (( no_git_install_epoch < install_before || \
         no_git_install_epoch > install_after )); then
-        fail_test "M7-T1 no-Git installation date is outside its interval"
+        fail_test "INSTALLATION-BUNDLE no-Git installation date is outside its interval"
     fi
     assert_text_not_contains "$no_git_version" "(live)" \
-        "M7-T1 no-Git installation used live metadata"
+        "INSTALLATION-BUNDLE no-Git installation used live metadata"
     assert_text_not_contains "$no_git_version" "$unrelated_hash" \
-        "M7-T1 no-Git installation used its HOME repository identity"
+        "INSTALLATION-BUNDLE no-Git installation used its HOME repository identity"
 
     socket_file=$(find "$root" -type s -print -quit)
     assert_equal "" "$socket_file" \
-        "M7-T1 did not begin with a cold tmux root"
-    run_outside_success m7-t1-cold-create "$root" "$home" "$xdg_home" \
+        "INSTALLATION-BUNDLE did not begin with a cold tmux root"
+    run_outside_success installation-bundle-cold-create "$root" "$home" "$xdg_home" \
         "$installed_runner" m7-install-session create \
         -s m7-install-session -c "$session_path"
     assert_equal "loaded" \
         "$(run_tmux "$root" show-options -gv @tmux-runner-m7-config)" \
-        "M7-T1 cold server did not load the preserved local config"
+        "INSTALLATION-BUNDLE cold server did not load the preserved local config"
     assert_equal "$session_path" \
         "$(pane_directory "$root" m7-install-session)" \
-        "M7-T1 installed runner started in the wrong directory"
+        "INSTALLATION-BUNDLE installed runner started in the wrong directory"
     assert_state_modes "$state_directory"
     assert_no_state_transactions "$state_directory"
-    pass_test M7-T1 \
+    pass_test INSTALLATION-BUNDLE \
         "spaced installation, preservation, and cold config startup"
 }
 
-function test_m7_t2_interface_bundle {
+function test_interface_bundle {
     local root=""
-    local home="$WORKSPACE/m7-t2/home"
-    local xdg_home="$WORKSPACE/m7-t2/config"
+    local home="$WORKSPACE/interface-bundle/home"
+    local xdg_home="$WORKSPACE/interface-bundle/config"
     local stdout_file=""
     local stderr_file=""
     local short_version=""
@@ -6791,14 +6791,14 @@ function test_m7_t2_interface_bundle {
     local command_name=""
     local -a command_names=(create c repo recent last ls attach a)
 
-    create_tmux_root m7-t2
+    create_tmux_root interface-bundle
     root="$NEW_TMUX_ROOT"
-    mkdir -p -- "$home" "$xdg_home" "$WORKSPACE/m7-t2/help"
-    run_tmux "$root" -f /dev/null new-session -d -s m7-interface
+    mkdir -p -- "$home" "$xdg_home" "$WORKSPACE/interface-bundle/help"
+    run_tmux "$root" -f /dev/null new-session -d -s interface-bundle
 
     for command_name in "${command_names[@]}"; do
-        stdout_file="$WORKSPACE/m7-t2/help/$command_name.stdout"
-        stderr_file="$WORKSPACE/m7-t2/help/$command_name.stderr"
+        stdout_file="$WORKSPACE/interface-bundle/help/$command_name.stdout"
+        stderr_file="$WORKSPACE/interface-bundle/help/$command_name.stderr"
         assert_command_succeeds "$command_name --help failed" \
             env PATH=/nonexistent /bin/bash "$RUNNER" \
             "$command_name" --help > "$stdout_file" 2> "$stderr_file"
@@ -6810,15 +6810,15 @@ function test_m7_t2_interface_bundle {
     done
     assert_command_succeeds "top-level help failed" \
         env PATH=/nonexistent /bin/bash "$RUNNER" --help \
-        > "$WORKSPACE/m7-t2/help/top.stdout" \
-        2> "$WORKSPACE/m7-t2/help/top.stderr"
-    assert_contains "$WORKSPACE/m7-t2/help/top.stdout" \
+        > "$WORKSPACE/interface-bundle/help/top.stdout" \
+        2> "$WORKSPACE/interface-bundle/help/top.stderr"
+    assert_contains "$WORKSPACE/interface-bundle/help/top.stdout" \
         "Default-server sessions are not migrated or visible" \
         "top-level help omits default-server isolation"
     short_version=$(env PATH=/nonexistent /bin/bash "$RUNNER" -V)
     long_version=$(env PATH=/nonexistent /bin/bash "$RUNNER" --version)
     assert_equal "$short_version" "$long_version" \
-        "M7-T2 version aliases differ"
+        "INTERFACE-BUNDLE version aliases differ"
 
     unset TMUX || true
     export TMUX_TMPDIR="$root"
@@ -6828,22 +6828,22 @@ function test_m7_t2_interface_bundle {
     COMP_WORDS=(tmux-runner "")
     COMP_CWORD=1
     _tmux_runner
-    assert_reply_set "M7-T2 command completion set is wrong" \
+    assert_reply_set "INTERFACE-BUNDLE command completion set is wrong" \
         create c repo recent last ls attach a -V --version -h --help
     COMP_WORDS=(tmux-runner attach -)
     COMP_CWORD=2
     _tmux_runner
-    assert_reply_set "M7-T2 attach option completion set is wrong" \
+    assert_reply_set "INTERFACE-BUNDLE attach option completion set is wrong" \
         -t -- -h --help
     COMP_WORDS=(tmux-runner a -)
     COMP_CWORD=2
     _tmux_runner
-    assert_reply_set "M7-T2 a option completion set is wrong" \
+    assert_reply_set "INTERFACE-BUNDLE a option completion set is wrong" \
         -t -- -h --help
-    COMP_WORDS=(tmux-runner attach -- m7)
+    COMP_WORDS=(tmux-runner attach -- interface)
     COMP_CWORD=3
     _tmux_runner
-    assert_reply_set "M7-T2 terminator completion set is wrong" m7-interface
+    assert_reply_set "INTERFACE-BUNDLE terminator completion set is wrong" interface-bundle
 
     assert_contains "$README" "Existing default-server sessions are not" \
         "README omits default-server isolation"
@@ -6869,11 +6869,11 @@ function test_m7_t2_interface_bundle {
     assert_contains "$README" "that server's configured detach binding" \
         "README omits the configured cross-server detach binding"
 
-    run_outside_success m7-t2-attach-terminator "$root" "$home" \
-        "$xdg_home" "$RUNNER" m7-interface attach -- m7-interface
-    assert_session_entry_trace "$LAST_TRANSCRIPT" "$root" m7-interface \
-        "M7-T2 valid attach -- did not use the exact session target"
-    pass_test M7-T2 "$TEST_VARIANT help, completion, README, and attach --"
+    run_outside_success interface-bundle-attach-terminator "$root" "$home" \
+        "$xdg_home" "$RUNNER" interface-bundle attach -- interface-bundle
+    assert_session_entry_trace "$LAST_TRANSCRIPT" "$root" interface-bundle \
+        "INTERFACE-BUNDLE valid attach -- did not use the exact session target"
+    pass_test INTERFACE-BUNDLE "$TEST_VARIANT help, completion, README, and attach --"
 }
 
 function assert_manifest_processes_stopped {
@@ -7429,7 +7429,7 @@ function run_supervisor {
         remove_supervisor_control_files "$supervisor_workspace"
         return 1
     fi
-    printf 'PASS M7-T3: complete source and installed integration suites\n'
+    printf 'PASS INTEGRATION-SUITE: complete source and installed integration suites\n'
 
     if ! run_observation_supervisor "$supervisor_workspace" source \
         "$SOURCE_RUNNER" "$ambient_repository"; then
@@ -7452,8 +7452,8 @@ function run_supervisor {
         return 1
     fi
     remove_supervisor_control_files "$supervisor_workspace"
-    printf 'PASS M3-T5: outer supervisor cleanup and failure retention\n'
-    printf 'PASS M7-T4: live isolation, cleanup, and failure evidence\n'
+    printf 'PASS SUPERVISOR-CLEANUP: outer supervisor cleanup and failure retention\n'
+    printf 'PASS RESOURCE-OBSERVATION: live isolation, cleanup, and failure evidence\n'
 }
 
 function main {
@@ -7471,28 +7471,28 @@ function main {
     test_t7_documentation
     test_t8_help
     test_t9_version
-    test_m3_t1_static_server_path
-    test_m3_t2_server_isolation
-    test_m3_t3_config_lifecycle
-    test_m3_t4_client_boundary
-    test_m4_t1_repository_identity
-    test_m4_t2_collision_identity
-    test_m4_t3_worktree_identity
-    test_m4_t4_directory_and_explicit_identity
-    test_m4_t5_regression_integration
-    test_m5_t1_repository_configuration
-    test_m5_t2_repository_discovery
-    test_m5_t3_repository_selection
-    test_m5_t4_repository_failures
-    test_m5_t5_interface_regression
-    test_m6_t1_recent_navigation
-    test_m6_t2_previous_navigation
-    test_m6_t3_state_failures_and_recovery
-    test_m6_t4_concurrent_state
-    test_m6_t5_interface_regression
-    test_m7_t1_installation
-    test_m7_t2_interface_bundle
-    exercise_m7_session_identity
+    test_server_command_path
+    test_server_isolation
+    test_server_config_lifecycle
+    test_server_client_boundary
+    test_identity_repository
+    test_identity_collision
+    test_identity_worktree
+    test_identity_explicit
+    test_identity_regression
+    test_catalog_configuration
+    test_catalog_discovery
+    test_catalog_selection
+    test_catalog_failures
+    test_catalog_regression
+    test_navigation_recent
+    test_navigation_previous
+    test_navigation_recovery
+    test_navigation_concurrency
+    test_navigation_regression
+    test_installation_bundle
+    test_interface_bundle
+    exercise_entry_session_identity
     printf 'PASS: %d milestone checks completed (%s)\n' \
         "$TESTS_PASSED" "$TEST_VARIANT"
 }
