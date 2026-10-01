@@ -107,7 +107,7 @@ function print_usage {
     printf '  %s repo\n' "$PROGRAM_NAME"
     printf '  %s recent\n' "$PROGRAM_NAME"
     printf '  %s last\n' "$PROGRAM_NAME"
-    printf '  %s ls\n' "$PROGRAM_NAME"
+    printf '  %s ls [--sort name|activity|created]\n' "$PROGRAM_NAME"
     printf '  %s attach -t <session-name>\n' "$PROGRAM_NAME"
     printf '  %s attach <session-name>\n' "$PROGRAM_NAME"
     printf '  %s attach -- <session-name>\n' "$PROGRAM_NAME"
@@ -217,10 +217,14 @@ function print_create_help {
 }
 
 function print_list_help {
-    printf 'Usage: %s ls\n' "$PROGRAM_NAME"
+    printf 'Usage: %s ls [--sort name|activity|created]\n' "$PROGRAM_NAME"
     printf '\nList complete tmux session rows, select one by number, and enter it.\n'
     printf '\nOptions:\n'
-    printf '  -h, --help  Show this help and exit.\n'
+    printf '  --sort name      Session name ascending (default).\n'
+    printf '  --sort activity  Last tmux activity, newest first.\n'
+    printf '  --sort created   Creation time, newest first.\n'
+    printf '  -h, --help       Show this help and exit.\n'
+    printf '\nEqual timestamps retain session name order.\n'
 }
 
 function print_repo_help {
@@ -3230,21 +3234,88 @@ function run_attach {
 
 function run_list {
     local output=""
+    local sort_order="name"
+    local saw_sort=0
+    local metadata=""
+    local session_name=""
+    local timestamp=""
+    local position=0
     local selection=""
     local index=0
     local selected_row=""
     local selected_name=""
     local -a rows=()
+    local -a timestamps=()
+    local -A sort_values=()
 
-    if (( $# > 0 )); then
-        fail "ls does not accept arguments"
-        return
-    fi
+    while (( $# > 0 )); do
+        case "$1" in
+            --sort)
+                if (( saw_sort )) || (( $# < 2 )); then
+                    fail "--sort requires one order and may appear only once"
+                    return
+                fi
+                sort_order="$2"
+                saw_sort=1
+                shift 2
+                ;;
+            --sort=*)
+                if (( saw_sort )); then
+                    fail "--sort may appear only once"
+                    return
+                fi
+                sort_order="${1#*=}"
+                saw_sort=1
+                shift
+                ;;
+            *)
+                fail "unknown ls argument: $1"
+                return
+                ;;
+        esac
+    done
+    case "$sort_order" in
+        name|activity|created) ;;
+        *)
+            fail "sort order must be name, activity, or created"
+            return
+            ;;
+    esac
     initialize_state_runtime || return
     if ! output=$(run_tmux_command list-sessions); then
         return 1
     fi
     mapfile -t rows <<< "$output"
+
+    # Preserve tmux's full rows and name order for equal timestamps.
+    # Sessions missing from the later metadata snapshot sort last.
+    if [[ "$sort_order" != "name" ]]; then
+        if ! metadata=$(run_tmux_command list-sessions -F \
+            "#{session_name}"$'\t'"#{session_${sort_order}}"); then
+            return 1
+        fi
+        while IFS=$'\t' read -r session_name timestamp; do
+            if [[ -z "$session_name" ]] || [[ ! "$timestamp" =~ ^[0-9]+$ ]]; then
+                fail "invalid session sort metadata"
+                return
+            fi
+            sort_values["$session_name"]=$((10#$timestamp))
+        done <<< "$metadata"
+        for index in "${!rows[@]}"; do
+            selected_row="${rows[$index]}"
+            session_name="${selected_row%%:*}"
+            timestamp="${sort_values[$session_name]:-0}"
+            position=$index
+            while (( position > 0 )) && \
+                (( timestamp > timestamps[position - 1] )); do
+                rows[position]="${rows[position - 1]}"
+                timestamps[position]="${timestamps[position - 1]}"
+                position=$((position - 1))
+            done
+            rows[position]="$selected_row"
+            timestamps[position]="$timestamp"
+        done
+    fi
 
     for index in "${!rows[@]}"; do
         printf '%d %s\n' "$((index + 1))" "${rows[$index]}"

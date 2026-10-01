@@ -50,7 +50,26 @@ function _tmux_runner {
                 )
             fi
             ;;
-        repo|recent|last|ls)
+        ls)
+            # Bash treats '=' as a word break unless the shell disables it.
+            if [[ "$current" == "=" && "$previous" == "--sort" ]]; then
+                current=""
+            fi
+            if [[ "$previous" == "--sort" ]] || \
+                { [[ "$previous" == "=" ]] && (( COMP_CWORD > 1 )) && \
+                    [[ "${COMP_WORDS[COMP_CWORD - 2]}" == "--sort" ]]; }; then
+                mapfile -t COMPREPLY < <(
+                    compgen -W 'name activity created' -- "$current"
+                )
+            elif [[ "$current" == --sort=* ]]; then
+                mapfile -t COMPREPLY < <(
+                    compgen -W '--sort=name --sort=activity --sort=created' -- "$current"
+                )
+            elif [[ "$current" == -* ]]; then
+                mapfile -t COMPREPLY < <(compgen -W '--sort -h --help' -- "$current")
+            fi
+            ;;
+        repo|recent|last)
             if [[ "$current" == -* ]]; then
                 mapfile -t COMPREPLY < <(compgen -W '-h --help' -- "$current")
             fi

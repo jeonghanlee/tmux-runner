@@ -165,6 +165,12 @@ When `-c` is absent, the current directory is used. A path inside a Git working
 tree starts the session at that working tree's top level. A non-Git path starts
 it at the resolved physical directory.
 
+Create or reuse the current directory's session with the short form:
+
+```bash
+tmux-runner c
+```
+
 Without `-s`, the runner first reuses a single session whose
 `@tmux-runner-path` exactly matches the canonical path. Otherwise, the initial
 name is `<repo-or-folder>-<short-hostname>`. A same-basename collision adds the
@@ -191,6 +197,25 @@ List complete `tmux ls` rows, choose one by number, and enter it:
 ```text
 tmux-runner ls
 ```
+
+The default order is session name ascending. To put the most recently active
+sessions first, use:
+
+```bash
+tmux-runner ls --sort activity
+```
+
+To put the most recently created sessions first, use:
+
+```bash
+tmux-runner ls --sort created
+```
+
+`--sort name` selects the default order explicitly. `--sort=<order>` is also
+accepted. Equal timestamps retain session name order. Activity uses tmux's
+`session_activity` timestamp, including interaction with attached clients.
+Creation uses `session_created`. Each displayed row retains the complete tmux
+session information, and its selection number follows the displayed order.
 
 Enter a named session directly:
 
@@ -475,19 +500,39 @@ Inspect the same action without writing files with
 
 ## Updating
 
-After updating the source checkout, run the installer again from the repository
-root:
+After updating the source checkout, install from the repository root and reload
+completion in the current Bash session:
 
 ```bash
 make install
+source ~/.local/share/bash-completion/completions/tmux-runner
 tmux-runner --version
 ```
 
-Reinstallation replaces the executable and completion file. It preserves an
-existing local `tmux.conf` unless `CONFIG_PROMPT=1` is used and replacement is
-confirmed.
+Reinstallation replaces the executable and completion file. Sourcing the
+installed completion file replaces the functions loaded in the current Bash
+session. Reinstallation preserves an existing local `tmux.conf` unless
+`CONFIG_PROMPT=1` is used and replacement is confirmed.
 
 ## Local Configuration
+
+With the starter configuration, press `Ctrl-b`, release the keys, then press
+one of the keys below. Korean Dubeolsik input uses the Korean key in the same
+row. Ctrl plus ㅠ (U+3160, the Dubeolsik `b` key) also acts as the prefix when
+the terminal reports that combination.
+
+| English Key | Korean Key | Action |
+| --- | --- | --- |
+| `c` | ㅊ | Create a window. |
+| `n` | ㅜ | Go to the next window. |
+| `p` | ㅔ | Go to the previous window. |
+| `w` | ㅈ | Choose a window. |
+| `o` | ㅐ | Move to the next pane. |
+| `z` | ㅋ | Toggle pane zoom. |
+| `x` | ㅌ | Close the pane after confirmation. |
+| `d` | ㅇ | Detach from the session. |
+
+For `x` or ㅌ, answer `y` to close the pane or `n` to cancel.
 
 Edit the runner-only configuration at
 `${XDG_CONFIG_HOME:-$HOME/.config}/tmux-runner/tmux.conf`. If the dedicated

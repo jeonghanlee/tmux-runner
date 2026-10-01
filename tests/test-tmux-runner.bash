@@ -3166,6 +3166,20 @@ function test_t2_create {
     assert_equal "$default_dir" "$(pane_directory "$root" "$default_name")" \
         "default create used the wrong directory"
 
+    pushd "$default_dir" >/dev/null
+    identity_before=$(session_identity "$root" "$default_name")
+    run_outside_success t2-c-current "$root" "$home" "$xdg_home" \
+        "$RUNNER" "$default_name" c
+    assert_equal "$identity_before" "$(session_identity "$root" "$default_name")" \
+        "c without options did not reuse the current directory session"
+    run_outside_success t2-c-dot "$root" "$home" "$xdg_home" \
+        "$RUNNER" "$default_name" c -c .
+    assert_equal "$identity_before" "$(session_identity "$root" "$default_name")" \
+        "c -c . did not reuse the same session as c"
+    assert_equal "$default_dir" "$(pane_directory "$root" "$default_name")" \
+        "current directory shorthand changed the pane directory"
+    popd >/dev/null
+
     run_outside_success t2-alias-create "$root" "$home" "$xdg_home" \
         "$RUNNER" alias_session_blue c -s alias.session:blue -c "$alias_dir"
     assert_session_entry_trace "$LAST_TRANSCRIPT" "$root" \
@@ -3499,10 +3513,145 @@ function test_t4_list {
     pass_test T4 "full-row UDS selection and input validation"
 }
 
+function run_sorted_list_case {
+    local label="$1"
+    local root="$2"
+    local home="$3"
+    local xdg_home="$4"
+    local expected_names="$5"
+    local expected_rows=""
+    local session_name=""
+    local index=0
+    local -a sorted_session_names=()
+
+    shift 5
+    read -r -a sorted_session_names <<< "$expected_names"
+    expected_rows=$(run_tmux "$root" list-sessions)
+    start_runner_outside "$label" "$root" "$home" "$xdg_home" \
+        "$RUNNER" ls "$@"
+    if ! wait_for_transcript_text "Select session:"; then
+        fail_test "$label did not display its prompt"
+    fi
+    assert_rows_visible "$LAST_TRANSCRIPT" "$expected_rows"
+    for session_name in "${sorted_session_names[@]}"; do
+        index=$((index + 1))
+        assert_equal "$index" "$(selection_number "$LAST_TRANSCRIPT" "$session_name")" \
+            "$label displayed the wrong position for $session_name"
+    done
+    session_name="${expected_names%% *}"
+    send_current_input '1\n'
+    if ! wait_for_client_session "$root" "$session_name"; then
+        fail_test "$label did not attach to the first displayed session"
+    fi
+    detach_current_client
+    finish_current_pty
+    assert_last_pty_succeeded "$label selection failed"
+    assert_session_entry_trace "$LAST_TRANSCRIPT" "$root" "$session_name" \
+        "$label selected a different session from its displayed row"
+}
+
+function test_list_sorting {
+    local root=""
+    local home="$WORKSPACE/list-sort/home"
+    local xdg_home="$WORKSPACE/list-sort/xdg"
+    local fingerprint_before=""
+    local timestamp=""
+    local order=""
+
+    create_tmux_root list-sort
+    root="$NEW_TMUX_ROOT"
+    mkdir -p -- "$home" "$xdg_home"
+    start_runner_outside list-sort-missing "$root" "$home" "$xdg_home" \
+        "$RUNNER" ls --sort
+    finish_current_pty
+    assert_last_pty_failed_without_timeout "missing sort order succeeded"
+    assert_contains "$LAST_TRANSCRIPT" "--sort requires one order" \
+        "missing sort order did not report an argument error"
+    start_runner_outside list-sort-unknown "$root" "$home" "$xdg_home" \
+        "$RUNNER" ls --sort invalid
+    finish_current_pty
+    assert_last_pty_failed_without_timeout "invalid sort order succeeded"
+    assert_contains "$LAST_TRANSCRIPT" "sort order must be" \
+        "invalid sort order did not report an argument error"
+    assert_equal "" "$(find "$root" -type s -print -quit)" \
+        "invalid ls sort arguments started a server"
+
+    # Real sessions share one creation second; later activity changes their order.
+    timestamp=$(date +%s)
+    while [[ "$(date +%s)" == "$timestamp" ]]; do
+        sleep "$POLL_INTERVAL_SECONDS"
+    done
+    run_tmux "$root" -f /dev/null new-session -d -s zulu \; \
+        new-session -d -s alpha
+    assert_equal "$(run_tmux "$root" display-message -p -t '=zulu:' '#{session_created}')" \
+        "$(run_tmux "$root" display-message -p -t '=alpha:' '#{session_created}')" \
+        "sort fixtures did not share a creation timestamp"
+    sleep 1
+    run_tmux "$root" new-session -d -s middle
+    run_sorted_list_case list-sort-default "$root" "$home" "$xdg_home" \
+        'alpha middle zulu'
+    run_sorted_list_case list-sort-name "$root" "$home" "$xdg_home" \
+        'alpha middle zulu' --sort name
+    run_sorted_list_case list-sort-created "$root" "$home" "$xdg_home" \
+        'middle alpha zulu' --sort created
+    run_sorted_list_case list-sort-created-equals "$root" "$home" "$xdg_home" \
+        'middle alpha zulu' --sort=created
+    sleep 1
+    start_source_client list-sort-activity "$root" "$home" "$xdg_home" zulu
+    detach_current_client
+    finish_current_pty
+    assert_last_pty_succeeded "sort activity fixture client failed"
+    run_sorted_list_case list-sort-activity "$root" "$home" "$xdg_home" \
+        'zulu middle alpha' --sort activity
+    run_sorted_list_case list-sort-activity-equals "$root" "$home" "$xdg_home" \
+        'zulu middle alpha' --sort=activity
+
+    fingerprint_before=$(server_fingerprint "$root")
+    for order in '' invalid; do
+        run_outside_syntax_failure "list-sort-invalid-${order:-empty}" \
+            "$root" "$home" "$xdg_home" "$RUNNER" ls --sort "$order"
+    done
+    run_outside_syntax_failure list-sort-duplicate "$root" "$home" "$xdg_home" \
+        "$RUNNER" ls --sort activity --sort created
+    run_outside_syntax_failure list-sort-duplicate-equals "$root" "$home" "$xdg_home" \
+        "$RUNNER" ls --sort=name --sort=created
+    run_outside_syntax_failure list-sort-extra "$root" "$home" "$xdg_home" \
+        "$RUNNER" ls --sort created extra
+    assert_equal "$fingerprint_before" "$(server_fingerprint "$root")" \
+        "invalid sort arguments changed server state"
+    pass_test LIST-SORT "name, creation ties, real activity, selection, and invalid arguments"
+}
+
+function run_readline_completion_case {
+    local label="$1"
+    local root="$2"
+    local home="$3"
+    local xdg_home="$4"
+    local shell_init="$5"
+    local input="$6"
+    local expected="$7"
+
+    start_pty_command "$label" "$root" "$home" "$xdg_home" \
+        bash --noprofile --rcfile "$shell_init" -i
+    if ! wait_for_transcript_text 'completion> '; then
+        fail_test "$label did not start interactive Bash"
+    fi
+    send_current_input "$input"$'\t\030\022'
+    if ! wait_for_transcript_text 'COMPLETION:'; then
+        fail_test "$label did not capture the completed Readline command"
+    fi
+    send_current_input '\025exit\n'
+    finish_current_pty
+    assert_last_pty_succeeded "$label interactive Bash failed"
+    assert_contains "$LAST_TRANSCRIPT" "COMPLETION:$expected:END" \
+        "$label completed the wrong command"
+}
+
 function test_t5_completion {
     local selected_root=""
     local other_root=""
     local completion_dir=""
+    local shell_init=""
 
     create_tmux_root t5-selected
     selected_root="$NEW_TMUX_ROOT"
@@ -3538,7 +3687,27 @@ function test_t5_completion {
     COMP_WORDS=(tmux-runner ls -)
     COMP_CWORD=2
     _tmux_runner
-    assert_reply_set "ls option completion set is wrong" -h --help
+    assert_reply_set "ls option completion set is wrong" --sort -h --help
+    COMP_WORDS=(tmux-runner ls --sort '')
+    COMP_CWORD=3
+    _tmux_runner
+    assert_reply_set "ls sort value completion set is wrong" name activity created
+    COMP_WORDS=(tmux-runner ls --sort a)
+    COMP_CWORD=3
+    _tmux_runner
+    assert_reply_set "ls sort value prefix completion is wrong" activity
+    COMP_WORDS=(tmux-runner ls --sort=cr)
+    COMP_CWORD=2
+    _tmux_runner
+    assert_reply_set "ls sort equals completion is wrong" --sort=created
+    COMP_WORDS=(tmux-runner ls --sort '=' cr)
+    COMP_CWORD=4
+    _tmux_runner
+    assert_reply_set "ls split sort equals completion is wrong" created
+    COMP_WORDS=(tmux-runner ls --sort '=')
+    COMP_CWORD=3
+    _tmux_runner
+    assert_reply_set "ls empty sort equals completion is wrong" name activity created
     COMP_WORDS=(tmux-runner repo -)
     COMP_CWORD=2
     _tmux_runner
@@ -3612,7 +3781,36 @@ function test_t5_completion {
     _tmux_runner
     assert_reply_set "a terminator dash completion is wrong" -dash
 
-    pass_test T5 "command, option, directory, and selected-UDS completion"
+    # Readline constructs completion words and replaces the actual command line.
+    shell_init="$completion_dir/bashrc"
+    {
+        printf '%s\n' 'PS1="completion> "'
+        printf 'source %q\n' "$COMPLETION"
+        # Readline expands the captured variable when the key binding runs.
+        # shellcheck disable=SC2016
+        printf 'bind -x %q\n' \
+            '"\C-x\C-r":printf "\nCOMPLETION:%s:END\n" "$READLINE_LINE"'
+    } > "$shell_init"
+    run_readline_completion_case t5-readline-created "$selected_root" \
+        "$completion_dir" "$completion_dir" "$shell_init" \
+        'tmux-runner ls --sort cr' 'tmux-runner ls --sort created '
+    run_readline_completion_case t5-readline-activity "$selected_root" \
+        "$completion_dir" "$completion_dir" "$shell_init" \
+        'tmux-runner ls --sort a' 'tmux-runner ls --sort activity '
+    run_readline_completion_case t5-readline-name "$selected_root" \
+        "$completion_dir" "$completion_dir" "$shell_init" \
+        'tmux-runner ls --sort na' 'tmux-runner ls --sort name '
+    run_readline_completion_case t5-readline-equals-created "$selected_root" \
+        "$completion_dir" "$completion_dir" "$shell_init" \
+        'tmux-runner ls --sort=cr' 'tmux-runner ls --sort=created '
+    run_readline_completion_case t5-readline-equals-activity "$selected_root" \
+        "$completion_dir" "$completion_dir" "$shell_init" \
+        'tmux-runner ls --sort=a' 'tmux-runner ls --sort=activity '
+    run_readline_completion_case t5-readline-equals-name "$selected_root" \
+        "$completion_dir" "$completion_dir" "$shell_init" \
+        'tmux-runner ls --sort=na' 'tmux-runner ls --sort=name '
+
+    pass_test T5 "command, option, directory, selected-UDS, and real Readline completion"
 }
 
 function test_t6_install {
@@ -7513,6 +7711,7 @@ function main {
     test_t2_create
     test_t3_attach
     test_t4_list
+    test_list_sorting
     test_t5_completion
     test_t6_install
     test_t7_documentation
