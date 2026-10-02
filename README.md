@@ -500,8 +500,53 @@ Inspect the same action without writing files with
 
 ## Updating
 
-After updating the source checkout, install from the repository root and reload
-completion in the current Bash session:
+From the repository root, update an existing installation in the current Bash
+session:
+
+```bash
+source configure/update-tmux-runner.bash
+```
+
+Use `source` so completion remains loaded in the current shell. The script
+fast-forwards the checkout, reinstalls the executable and completion file,
+loads completion, prints the installed version, and reloads the local tmux
+configuration. A failed Git update or installation stops the script before
+the tmux reload.
+
+By default, the script asks whether to replace an existing regular
+`tmux.conf`. Answer `y` or `Y` to install the repository configuration; Enter,
+any other answer, or end-of-file keeps the existing file. A configuration
+symlink is preserved. To keep an existing configuration without a prompt,
+use:
+
+```bash
+CONFIG_PROMPT=0 source configure/update-tmux-runner.bash
+```
+
+The script reloads only the `tmux -L tmux-runner` server selected by
+`${TMUX_TMPDIR:-/tmp}`. It does not restart the server. It clears the local
+`prefix2` override in every session so each session inherits the global value
+from the loaded configuration. Other session-local options are preserved.
+Other tmux servers are unchanged. If the dedicated server is not running,
+the script leaves it stopped; its next start loads the installed configuration.
+
+Verify that the output includes the installed version and a
+`Reloaded config on` message with the session count and inherited `prefix2`.
+When the server is stopped, the output instead reports
+`No running tmux-runner server`. Confirm completion in the same Bash session:
+
+```bash
+complete -p tmux-runner
+```
+
+The expected registration is:
+
+```
+complete -F _tmux_runner tmux-runner
+```
+
+For a manual update after updating the source checkout, install from the
+repository root and reload completion in the current Bash session:
 
 ```bash
 make install
