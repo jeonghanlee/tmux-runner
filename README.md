@@ -102,17 +102,18 @@ and an attach acknowledgment queued by tmux after outside-client handoff.
 
 ## Requirements
 
-Session commands require Bash 4 or later, tmux, `flock`, `mktemp`, `mkdir`,
-`chmod`, `mv`, `ln`, `rm`, and `sleep`. `create`, `repo`, and `recent` require
-Git to validate working-tree identity. Their automatic session names also
-require `hostname`; `sha256sum` is required when parent components cannot
-produce an available distinct name, including normalized path collisions.
-`repo`, catalog-aware automatic `create`, and catalog-aware `recent` also
-require `find` and `sort`. `ls` and `attach` do not require Git, `hostname`,
-`sha256sum`, `find`, or `sort`; when Git is available, entry into a marked
-session uses it to classify that path before updating `recent`. A present
-session marker must be the reserved `tmux-runner-unmarked` value, a legacy
-absolute path, or a valid `v1:` value; other values are rejected before entry.
+Session commands require Bash 4 or later, tmux 3.5a or later, `flock`,
+`mktemp`, `mkdir`, `chmod`, `mv`, `ln`, `rm`, and `sleep`. `create`, `repo`,
+and `recent` require Git to validate working-tree identity. Their automatic
+session names also require `hostname`; `sha256sum` is required when parent
+components cannot produce an available distinct name, including normalized
+path collisions. `repo`, catalog-aware automatic `create`, and catalog-aware
+`recent` also require `find` and `sort`. `ls` and `attach` do not require Git,
+`hostname`, `sha256sum`, `find`, or `sort`; when Git is available, entry into
+a marked session uses it to classify that path before updating `recent`. A
+present session marker must be the reserved `tmux-runner-unmarked` value, a
+legacy absolute path, or a valid `v1:` value; other values are rejected before
+entry.
 
 Installation additionally requires GNU Make, `install`, `date`, and `sed` to
 copy the runner and stamp its Git and installation metadata. Confirm that the
